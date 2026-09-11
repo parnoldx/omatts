@@ -116,8 +116,7 @@ a C++17 compiler.
 - Model weights: the ONNX files in `models/` are derived from Kyutai Labs'
   [Pocket TTS](https://huggingface.co/kyutai/pocket-tts) and are licensed
   [CC-BY-4.0](models/LICENSE-WEIGHTS.txt) — attribution and modification
-  notice included there. Voice samples in `voices/` are Kyutai's pre-made
-  voices; cloning your own voice from audio you have the rights to is on you.
+  notice included there.
 
 ## Credits
 
