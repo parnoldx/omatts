@@ -1,0 +1,31 @@
+# Build artifacts
+.build/
+dist/
+
+# Compiled binaries / downloaded runtime
+omatts
+libonnxruntime.so*
+*.dylib
+*.dll
+*.lib
+*.exe
+
+# ONNX models (too large for git — produced by export_onnx.py)
+models/
+models-german/
+
+# Voice samples and cache
+voices/
+voices/.cache/
+
+# Python
+.venv/
+__pycache__/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
