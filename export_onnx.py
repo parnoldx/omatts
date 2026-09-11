@@ -1067,6 +1067,12 @@ def externalize_models(onnx_dir: Path):
                for i in model.graph.initializer):
             print(f"  ⊘ {f.name} (already external)")
             continue
+        # onnx.save_model appends to an existing external-data file instead of
+        # truncating it, so every re-export would leave a dead copy of the
+        # weights behind and the .data file grows by one copy per run.
+        data_file = f.parent / (f.name + ".data")
+        if data_file.exists():
+            data_file.unlink()
         inline_mb = sum(i.ByteSize() for i in model.graph.initializer) / 1e6
         onnx.save_model(
             model, str(f),
