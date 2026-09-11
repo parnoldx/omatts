@@ -16,7 +16,7 @@ set -e
 
 REPO="${OMATTS_REPO:-parnoldx/omatts}"
 VERSION="${OMATTS_VERSION:-latest}"
-URL="${OMATTS_URL:-https://github.com/$REPO/releases/$VERSION/download/omatts-linux-x86_64.tar.zst}"
+URL="${OMATTS_URL:-https://github.com/$REPO/releases/download/$VERSION/omatts-linux-x86_64.tar.zst}"
 PREFIX="${PREFIX:-$HOME/.local}"
 SHARE="$PREFIX/share/omatts"
 
