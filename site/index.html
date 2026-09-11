@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="en" data-theme="night">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>omatts — Fast, local text-to-speech with voice cloning.</title>
+    <meta
+      name="description"
+      content="Fast, fully local text-to-speech with zero-shot voice cloning. One C++ file drives Kyutai's Pocket TTS model on CPU at 9.2x realtime. Pure CLI, zero dependencies, zero cloud."
+    />
+    <meta name="theme-color" content="#1a1b26" />
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="omatts — Fast, local text-to-speech with voice cloning." />
+    <meta
+      property="og:description"
+      content="Fast, fully local text-to-speech with zero-shot voice cloning. One C++ file drives Kyutai's Pocket TTS model on CPU at 9.2x realtime. Pure CLI, zero dependencies, zero cloud."
+    />
+    <meta property="og:site_name" content="omatts" />
+    <meta property="og:url" content="https://parnoldx.github.io/omatts/" />
+    <link rel="canonical" href="https://parnoldx.github.io/omatts/" />
+    <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="assets/site.css" />
+    <script src="assets/site.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header">
+      <div class="container header-inner">
+        <a class="brand" href="index.html" aria-label="omatts home">
+          <svg viewBox="0 0 40 40" fill="none" aria-hidden="true">
+            <rect width="40" height="40" rx="8" fill="currentColor" fill-opacity="0.15" />
+            <rect x="7" y="18" width="3.5" height="5" rx="1.75" fill="#92b4ff" />
+            <rect x="13" y="12" width="3.5" height="17" rx="1.75" fill="currentColor" />
+            <rect x="19" y="8" width="3.5" height="25" rx="1.75" fill="currentColor" />
+            <rect x="25" y="14" width="3.5" height="13" rx="1.75" fill="#7dcfff" />
+            <rect x="31" y="19" width="3.5" height="4" rx="1.75" fill="#92b4ff" />
+          </svg>
+          <span>omatts<span class="accent">.</span></span>
+        </a>
+        <nav class="site-nav" aria-label="Main navigation">
+          <a class="desktop-link" href="#basics">The Basics</a>
+          <a class="desktop-link" href="#why-omatts">Why omatts</a>
+          <a href="#install">Install</a>
+          <a href="https://github.com/parnoldx/omatts">GitHub <span aria-hidden="true">↗</span></a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main" tabindex="-1">
+      <div class="container">
+        <!-- Hero Section -->
+        <section class="hero" aria-labelledby="hero-title">
+          <div class="hero-grid">
+            <div>
+              <div class="eyebrow">
+                <span class="status-dot" aria-hidden="true"></span>Fast · Voice Cloning · Zero Dependencies
+              </div>
+              <h1 id="hero-title">
+                Fast voice cloning.<br />Zero dependencies.<br /><span class="accent">Pure CLI.</span>
+              </h1>
+              <p class="hero-copy">
+                Fast, fully local text-to-speech with zero-shot voice cloning. One single C++ file
+                drives Kyutai's Pocket TTS model through ONNX Runtime on your CPU. No Python runtime,
+                no PyTorch, no cloud, no API keys. 9.2× faster than realtime with 30ms to first audio.
+              </p>
+              <div class="hero-actions">
+                <a class="button" href="#install">Get omatts <span aria-hidden="true">↗</span></a>
+                <a class="text-link" href="https://github.com/parnoldx/omatts">Read the source ↗</a>
+              </div>
+              <div class="compat">
+                <span class="file-pill highlight">9.2× CPU Speed</span>
+                <span class="file-pill blue-pill">Zero-Shot Cloning</span>
+                <span class="file-pill">No Python / Zero Deps</span>
+                <span class="file-pill">OpenAI /v1/audio/speech</span>
+              </div>
+              <p class="small-note">Free &amp; open source · Omarchy · MIT</p>
+            </div>
+
+            <!-- Useful Instant Quickstart Card -->
+            <div class="hero-card">
+              <div class="hero-card-header">
+                <div class="hero-card-title">
+                  <span class="prompt" aria-hidden="true">$</span> Quickstart
+                </div>
+                <span class="file-pill highlight">Omarchy</span>
+              </div>
+
+              <div class="terminal hero-install-box">
+                <div class="terminal-title">
+                  <span>1. Install (one command)</span>
+                  <button
+                    class="copy-button"
+                    type="button"
+                    data-copy="hero-install-cmd"
+                    data-feedback="hero-copy-feedback"
+                    hidden
+                    aria-label="Copy installation command"
+                  >
+                    Copy
+                  </button>
+                </div>
+                <div class="command-row">
+                  <code id="hero-install-cmd">curl -fsSL https://raw.githubusercontent.com/parnoldx/omatts/master/install.sh | sh</code>
+                </div>
+                <p id="hero-copy-feedback" class="copy-feedback" role="status" aria-live="polite"></p>
+              </div>
+
+              <div class="hero-examples">
+                <div class="hero-examples-title">2. Everyday Commands</div>
+                <div class="hero-code-block">
+                  <div><span class="cli-comment"># Speak text out loud (sub-30ms first audio):</span></div>
+                  <div><span class="cli-prompt-sym">~ ❯ </span><span class="cli-cmd">omatts Hello world</span></div>
+
+                  <div class="hero-code-spacer"></div>
+                  <div><span class="cli-comment"># Pick a voice from voices/ (e.g. dhh):</span></div>
+                  <div><span class="cli-prompt-sym">~ ❯ </span><span class="cli-cmd">omatts -v dhh "We can fix everything."</span></div>
+
+                  <div class="hero-code-spacer"></div>
+                  <div><span class="cli-comment"># Pipe stdout from any task or script:</span></div>
+                  <div><span class="cli-prompt-sym">~ ❯ </span><span class="cli-cmd">echo "Build finished in 4.2 seconds" | omatts</span></div>
+
+                  <div class="hero-code-spacer"></div>
+                  <div><span class="cli-comment"># Clone any audio clip:</span></div>
+                  <div><span class="cli-prompt-sym">~ ❯ </span><span class="cli-cmd">omatts -v ~/clip.mp3 "Cloned voice output"</span></div>
+                </div>
+              </div>
+
+              <div class="hero-specs-row">
+                <div class="spec-pill"><span>⚡</span> <b>9.2×</b> CPU</div>
+                <div class="spec-pill"><span>⏱</span> <b>30ms</b> latency</div>
+                <div class="spec-pill"><span>📦</span> <b>0</b> deps</div>
+                <div class="spec-pill"><span>🔒</span> <b>100%</b> local</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Principles Ribbon -->
+        <div class="principles" aria-label="Project principles">
+          <span><b>01</b> 9.2× realtime on CPU</span>
+          <span><b>02</b> Zero-shot voice cloning</span>
+          <span><b>03</b> Zero dependencies</span>
+          <span><b>04</b> 30ms time to first audio</span>
+        </div>
+
+        <!-- Section 1: The Basics -->
+        <section class="section" id="basics" aria-labelledby="basics-title">
+          <div class="section-heading">
+            <div>
+              <div class="section-number">01 / THE BASICS</div>
+              <h2 id="basics-title">
+                Zero ceremony. Just run it in your shell<span class="accent">.</span>
+              </h2>
+            </div>
+            <p>
+              No browser, no Electron app, no Python virtual environments. <code>omatts</code> is a
+              single standalone CLI binary that reads text from arguments or stdin and speaks immediately.
+            </p>
+          </div>
+
+          <div class="reference-table-wrap">
+            <table class="reference-table">
+              <thead>
+                <tr>
+                  <th>What you want to do</th>
+                  <th>Terminal Command</th>
+                  <th>Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>Speak text out loud</strong></td>
+                  <td><code>omatts Hello world</code></td>
+                  <td>Quotes optional; multiple words joined automatically</td>
+                </tr>
+                <tr>
+                  <td><strong>Pick a voice from voices/</strong></td>
+                  <td><code>omatts -v dhh "Hello world"</code></td>
+                  <td>Voice name from <code>voices/</code> (e.g. alba, dhh, george, anna)</td>
+                </tr>
+                <tr>
+                  <td><strong>Clone any voice clip</strong></td>
+                  <td><code>omatts -v ~/clips/speaker.mp3 "Hello"</code></td>
+                  <td>Any 3–10s WAV, MP3, FLAC, or OGG file</td>
+                </tr>
+                <tr>
+                  <td><strong>Save to audio file</strong></td>
+                  <td><code>omatts -o speech.wav "Save this"</code></td>
+                  <td>Writes 24kHz float32 WAV to disk without playing</td>
+                </tr>
+                <tr>
+                  <td><strong>Read from stdin</strong></td>
+                  <td><code>echo "Task completed" | omatts</code></td>
+                  <td>Great for bash pipes, cron jobs, and build alerts</td>
+                </tr>
+                <tr>
+                  <td><strong>Stream to media player</strong></td>
+                  <td><code>omatts -o - "Stream" | ffplay -nodisp -autoexit -</code></td>
+                  <td>Streams raw WAV chunks to stdout</td>
+                </tr>
+                <tr>
+                  <td><strong>Run OpenAI HTTP server</strong></td>
+                  <td><code>omatts serve --port 8080</code></td>
+                  <td>OpenAI-compatible drop-in for SillyTavern &amp; Open WebUI</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- Section 2: Why This CLI Is Great (The 3 Essentials: Fast, Voice Cloning, Zero Dependencies) -->
+        <section class="section" id="why-omatts" aria-labelledby="why-title">
+          <div class="section-heading">
+            <div>
+              <div class="section-number">02 / WHY OMATTS IS GREAT</div>
+              <h2 id="why-title">
+                Fast. Voice cloning. Zero dependencies<span class="accent">.</span>
+              </h2>
+            </div>
+            <p>
+              Built specifically to do one job brilliantly: turn text into high quality cloned speech
+              directly on your computer without waiting on networks, GPUs, or Python runtimes.
+            </p>
+          </div>
+
+          <div class="feature-grid">
+            <article>
+              <span class="feature-mark" aria-hidden="true">
+                <svg viewBox="0 0 32 32">
+                  <path d="M13 2L3 14h9l-1 12 10-12h-9l1-12z" />
+                </svg>
+              </span>
+              <h3>1. Blazingly Fast</h3>
+              <p>
+                Runs <strong>9.2× faster than realtime on CPU</strong>. Quantized INT8 weights and AVX2/NEON acceleration ensure instant generation on any modern laptop or desktop. A background daemon keeps models warm so audio starts playing within <strong>30ms</strong> of hitting Enter.
+              </p>
+              <code>9.2× realtime · 30ms to first audio · INT8 CPU</code>
+            </article>
+
+            <article>
+              <span class="feature-mark" aria-hidden="true">
+                <svg viewBox="0 0 32 32">
+                  <path d="M16 4a6 6 0 0 0-6 6v8a6 6 0 0 0 12 0v-8a6 6 0 0 0-6-6zM6 16a10 10 0 0 0 20 0M16 26v4M12 30h8" />
+                </svg>
+              </span>
+              <h3>2. Zero-Shot Voice Cloning</h3>
+              <p>
+                Point it at 3 to 10 seconds of any audio file (<code>-v sample.wav</code>) and it speaks in that voice. Includes bundled studio voices (<code>alba</code>, <code>dhh</code>, <code>george</code>, <code>anna</code>). Transformer KV prompt caching restores conditioned voices in just <strong>4ms</strong>.
+              </p>
+              <code>-v &lt;clip&gt; · zero training · 4ms KV cache</code>
+            </article>
+
+            <article>
+              <span class="feature-mark" aria-hidden="true">
+                <svg viewBox="0 0 32 32">
+                  <path d="M4 6h24v20H4zM4 11h24M10 6v5" />
+                </svg>
+              </span>
+              <h3>3. Zero Dependencies</h3>
+              <p>
+                One single C++ file driving ONNX Runtime. <strong>No Python interpreter, no PyTorch, no CUDA, no cloud servers, and no API keys</strong>. It never sends your audio or text across the internet. Everything runs 100% locally and privately on your machine.
+              </p>
+              <code>pure C++ · single binary · 100% local &amp; offline</code>
+            </article>
+          </div>
+        </section>
+
+        <!-- Section 3: Installation -->
+        <section class="install" id="install" aria-labelledby="install-title">
+          <div class="install-grid">
+            <div>
+              <div class="section-number">03 / INSTALLATION</div>
+              <h2 id="install-title">
+                One command. Ready in seconds<span class="accent">.</span>
+              </h2>
+              <p class="install-copy">
+                The install script downloads the pre-built Linux x86_64 bundle with pre-quantized
+                models and starter voices. No Python, pip, or PyTorch required.
+              </p>
+              <p class="install-copy">
+                Requires only <code>curl</code> and <code>zstd</code>. Binary lands in <code>~/.local/bin</code>,
+                models and voices land in <code>~/.local/share/omatts</code>.
+              </p>
+              <a class="text-link" href="https://github.com/parnoldx/omatts#readme">
+                Full command manual &amp; build guide ↗
+              </a>
+            </div>
+
+            <div>
+              <div class="terminal">
+                <div class="terminal-title">
+                  Terminal <span>Automated curl-to-sh install</span>
+                </div>
+                <div class="command-row">
+                  <span class="prompt" aria-hidden="true">$</span>
+                  <code id="install-command">curl -fsSL https://raw.githubusercontent.com/parnoldx/omatts/master/install.sh | sh</code>
+                  <button
+                    class="copy-button"
+                    type="button"
+                    data-copy="install-command"
+                    data-feedback="copy-feedback"
+                    hidden
+                    aria-label="Copy installation command"
+                  >
+                    Copy
+                  </button>
+                </div>
+                <p id="copy-feedback" class="copy-feedback" role="status" aria-live="polite"></p>
+              </div>
+
+              <ol class="install-steps">
+                <li>
+                  <strong>Install binary and models.</strong>
+                  <span>Run the curl-to-sh command above to install <code>omatts</code> to <code>~/.local/bin</code>.</span>
+                </li>
+                <li>
+                  <strong>Speak your first sentence.</strong>
+                  <span>Run <code>omatts Hello world</code> in any terminal. The daemon warms up and speaks out loud.</span>
+                </li>
+                <li>
+                  <strong>Get daily personal motivation.</strong>
+                  <span>Run <code>omatts -v dhh "We can fix everything."</code> and conquer your day.</span>
+                </li>
+              </ol>
+
+              <p class="release-note">
+                Building from source: <code>make build</code> compiles the single C++ file using CMake; <code>make dist</code> regenerates ONNX weights with <code>export_onnx.py</code>.
+              </p>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <footer class="site-footer">
+      <div class="container">
+        <div class="footer-top">
+          <a class="brand" href="index.html">
+            <svg viewBox="0 0 40 40" fill="none" aria-hidden="true">
+              <rect width="40" height="40" rx="8" fill="currentColor" fill-opacity="0.15" />
+              <rect x="7" y="18" width="3.5" height="5" rx="1.75" fill="#92b4ff" />
+              <rect x="13" y="12" width="3.5" height="17" rx="1.75" fill="currentColor" />
+              <rect x="19" y="8" width="3.5" height="25" rx="1.75" fill="currentColor" />
+              <rect x="25" y="14" width="3.5" height="13" rx="1.75" fill="#7dcfff" />
+              <rect x="31" y="19" width="3.5" height="4" rx="1.75" fill="#92b4ff" />
+            </svg>
+            <span>omatts<span class="accent">.</span></span>
+          </a>
+          <nav class="footer-links" aria-label="Footer navigation">
+            <a href="https://github.com/parnoldx/omatts/issues">Contact ↗</a>
+            <a href="https://github.com/parnoldx/omatts/blob/master/LICENSE">MIT license ↗</a>
+            <a href="https://github.com/parnoldx/omatts">GitHub ↗</a>
+          </nav>
+        </div>
+        <div class="footer-bottom">
+          <span>Made for the <a href="https://omarchy.org/">Omarchy</a> desktop.</span>
+        </div>
+        <div class="footer-wordmark" aria-hidden="true">omatts.</div>
+      </div>
+    </footer>
+  </body>
+</html>

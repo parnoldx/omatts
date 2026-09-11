@@ -89,6 +89,16 @@ MIMI_CONTEXT = 250       # Mimi transformer attention context window
 MIMI_CACHE_LEN = 250     # Mimi KV cache allocation (circular buffer, matches MIMI_CONTEXT)
 OPSET = 17
 
+# Layer count: we export the standard 6-layer flow_lm, not the newer `_24l`
+# language variants upstream added (english_2026-04_24l, french_24l, ...).
+# The 24l tier is ~higher quality but ~4x slower on CPU: 6->24 layers means
+# ~300 MB vs 75 MB for flow_lm_main_int8, ~1.3 GB vs 219 MB fp32 weights,
+# ~4x per-step AR compute, KV cache 25 MB -> 100 MB (states scale 3 per layer,
+# 18 -> 72). We choose the 6-layer tier for real-time CPU inference; revisit
+# only as an optional second model pack if voice quality complaints show up.
+# Supporting it means parameterizing NUM_LAYERS here and in omatts.cpp
+# (StatefulRunner state wiring, .kv voice format).
+
 
 # ============================================================================
 # Helpers

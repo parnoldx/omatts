@@ -6,7 +6,7 @@ TARBALL   := $(DIST_DIR)/omatts-linux-x86_64.tar.zst
 REPO ?= parnoldx/omatts
 TAG  ?= v$(shell date +%Y.%m.%d)
 
-.PHONY: build install shared deploy clean
+.PHONY: build install shared deploy clean site-check site-serve
 
 PREFIX ?= $(HOME)/.local
 
@@ -36,3 +36,11 @@ deploy: build
 
 clean:
 	rm -rf $(BUILD_DIR) $(DIST_DIR)
+
+# Validate the self-contained static documentation website.
+site-check:
+	python3 scripts/check-site.py
+
+# Serve the static website locally for testing.
+site-serve:
+	python3 -m http.server -d site 8080

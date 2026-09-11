@@ -1,4 +1,6 @@
-# Omatts
+# <img src="site/assets/favicon.svg" alt="" width="28" height="28"> Omatts
+
+**Website:** [parnoldx.github.io/omatts](https://parnoldx.github.io/omatts/)
 
 Fast, fully local text-to-speech with voice cloning. One C++ file drives the
 [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) model through ONNX
