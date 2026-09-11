@@ -110,9 +110,16 @@ mmaps at load — keep each `.data` next to its `.onnx`. All dependencies (ONNX
 Runtime, SentencePiece, dr_wav) are fetched by CMake; you need CMake 3.28+ and
 a C++17 compiler.
 
+## Licenses
+
+- Code: MIT — see [LICENSE](LICENSE).
+- Model weights: the ONNX files in `models/` are derived from Kyutai Labs'
+  [Pocket TTS](https://huggingface.co/kyutai/pocket-tts) and are licensed
+  [CC-BY-4.0](models/LICENSE-WEIGHTS.txt) — attribution and modification
+  notice included there. Voice samples in `voices/` are Kyutai's pre-made
+  voices; cloning your own voice from audio you have the rights to is on you.
+
 ## Credits
 
 - [Kyutai Labs](https://github.com/kyutai-labs/pocket-tts) — Pocket TTS model and original Python implementation (MIT)
 - [Verylicious/pocket-tts-ungated](https://huggingface.co/Verylicious/pocket-tts-ungated) — Ungated weights and tokenizer (CC-BY-4.0)
-
-MIT — see [LICENSE](LICENSE).
