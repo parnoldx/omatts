@@ -4001,7 +4001,6 @@ static void print_brief_usage(const char* p) {
                  "\n"
                  "  " << p << " Hello world              # speak (default voice: alba)\n"
                  "  " << p << " -v dhh Hello world       # pick a voice  (list: " << p << " voices)\n"
-                 "  " << p << " -v de/juergen Hallo      # tag/ voice: uses the models-de language pack\n"
                  "  " << p << " -o out.wav Hello world   # write a WAV file instead of playing (-o - = stdout)\n"
                  "  echo \"Task finished\" | " << p << "   # read text from stdin\n"
                  "  " << p << " voices [open|demo]      # list / open the voices folder, or hear each voice\n"
