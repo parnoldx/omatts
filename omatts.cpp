@@ -79,6 +79,7 @@
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <random>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -1760,19 +1761,25 @@ public:
         }
         
         auto& env = get_ort_env();
-        std::string sfx = cfg_.precision == "int8" ? "_int8" : "";
+        // Per-model suffix: prefer _int8 when the pack ships it, fall back to
+        // fp32 otherwise (the German pack has no int8 mimi_decoder).
+        auto pick_sfx = [&](const char* base) {
+            return std::filesystem::exists(cfg_.models_dir + "/" + base + "_int8.onnx") ? std::string("_int8") : std::string();
+        };
+        std::string main_sfx = pick_sfx("flow_lm_main");
         
         // Lazy: the encoder session is only needed on voice-cache miss (~70ms
         // load); cache-hit calls (the common case for the CLI) skip it entirely.
         enc_file_ = std::filesystem::exists(cfg_.models_dir + "/mimi_encoder.onnx");
         if (enc_file_) enc_threads_ = threads_full;
         txt_ = std::make_unique<OrtSession>(env, cfg_.models_dir + "/text_conditioner.onnx", opts_full, "text_conditioner");
-        main_ = std::make_unique<OrtSession>(env, cfg_.models_dir + "/flow_lm_main" + sfx + ".onnx", opts_ar, "flow_lm_main" + sfx);
-        flow_ = std::make_unique<OrtSession>(env, cfg_.models_dir + "/flow_lm_flow" + (cfg_.flow_fp32 ? "" : sfx) + ".onnx", opts_ar, "flow_lm_flow" + (cfg_.flow_fp32 ? "" : sfx));
+        main_ = std::make_unique<OrtSession>(env, cfg_.models_dir + "/flow_lm_main" + main_sfx + ".onnx", opts_ar, "flow_lm_main" + main_sfx);
+        flow_ = std::make_unique<OrtSession>(env, cfg_.models_dir + "/flow_lm_flow" + (cfg_.flow_fp32 ? "" : pick_sfx("flow_lm_flow")) + ".onnx", opts_ar, "flow_lm_flow" + (cfg_.flow_fp32 ? "" : pick_sfx("flow_lm_flow")));
         // fp32 decoder preferred when the pack ships one (German): the German
         // decoder's int8 quantization is broken — same pattern as flow_fp32.
-        bool dec_fp32 = std::filesystem::exists(cfg_.models_dir + "/mimi_decoder.onnx");
-        dec_ = std::make_unique<OrtSession>(env, cfg_.models_dir + "/mimi_decoder" + (dec_fp32 ? "" : sfx) + ".onnx", opts_dec, "mimi_decoder" + (dec_fp32 ? "" : sfx));
+        std::string dec_sfx = std::filesystem::exists(cfg_.models_dir + "/mimi_decoder.onnx")
+                                  ? std::string() : pick_sfx("mimi_decoder");
+        dec_ = std::make_unique<OrtSession>(env, cfg_.models_dir + "/mimi_decoder" + dec_sfx + ".onnx", opts_dec, "mimi_decoder" + dec_sfx);
         
         main_runner_ = std::make_unique<StatefulRunner>(*main_);
         dec_runner_ = std::make_unique<StatefulRunner>(*dec_);
@@ -3156,6 +3163,26 @@ static const char* player_command() {
     return cmd.c_str();
 }
 
+// Grow the pipe to the player. Linux caps unprivileged F_SETPIPE_SZ at
+// fs.pipe-max-size (1MB by default), so 4MB only takes after:
+//   sudo sysctl fs.pipe-max-size=4194304
+// Returns the achieved capacity (0 if unsupported). Callers print it so the
+// buffer experiment is verifiable: a "1024 KiB" line means the kernel cap bit
+// and a bigger buffer can't be the fix.
+static size_t grow_playback_pipe(FILE* p) {
+#ifdef __linux__
+    // 4MB is what we want; without CAP_SYS_RESOURCE the kernel caps us at
+    // fs.pipe-max-size, so fall back to the old 1MB rather than 64KB default.
+    if (fcntl(fileno(p), F_SETPIPE_SZ, 4u << 20) == -1)
+        fcntl(fileno(p), F_SETPIPE_SZ, 1u << 20);
+    int got = fcntl(fileno(p), F_GETPIPE_SZ);
+    return got > 0 ? (size_t)got : 0;
+#else
+    (void)p;
+    return 0;
+#endif
+}
+
 // Live generation progress. Real length is unknown until EOS, so the bar is
 // scaled to a word-count estimate and clamps at 100% — a courtesy indicator,
 // not a contract. Drawn on stderr only when it's a tty (and not --quiet/--stdout).
@@ -3615,7 +3642,28 @@ static int daemon_client(const std::string& path, const std::string& text, const
     else prog.begin(text, show_status);
     char buf[65536];
     ssize_t n;
-    if (stdout_output) {
+    if (stdout_output && output.size() > 1) {  // "-.mp3"/"-.opus": buffer PCM, encode once
+        std::vector<float> samples;
+        while ((n = recv(fd, buf, sizeof(buf), 0)) > 0) {
+            size_t cnt = (size_t)n / sizeof(float);
+            const float* f = reinterpret_cast<const float*>(buf);
+            samples.insert(samples.end(), f, f + cnt);
+            total_samples += cnt;
+            prog.add(cnt);
+        }
+        TTSServer::apply_speed(samples, speed);
+        auto wav = TTSServer::encode_output(samples, out_path);
+        if (wav.empty()) {
+            std::cerr << "Error: " << out_path << " requires ffmpeg, which was not found\n";
+            prog.finish();
+            ptt_close(fd);
+            return 1;
+        }
+#ifdef _WIN32
+        _setmode(_fileno(stdout), _O_BINARY);
+#endif
+        fwrite(wav.data(), 1, wav.size(), stdout);
+    } else if (stdout_output) {
 #ifdef _WIN32
         _setmode(_fileno(stdout), _O_BINARY);
 #endif
@@ -3876,7 +3924,7 @@ static void print_brief_usage(const char* p) {
                  "  " << p << " -v de/juergen Hallo      # tag/ voice: uses the models-de language pack\n"
                  "  " << p << " -o out.wav Hello world   # write a WAV file instead of playing (-o - = stdout)\n"
                  "  echo \"Task finished\" | " << p << "   # read text from stdin\n"
-                 "  " << p << " voices [open]            # list voices / open the voices folder\n"
+                 "  " << p << " voices [open|demo]      # list / open the voices folder, or hear each voice\n"
                  "  " << p << " serve                    # OpenAI-compatible HTTP server on :8080\n"
                  "\nRun \"" << p << " help\" for all options.\n";
 }
@@ -3884,7 +3932,7 @@ static void print_brief_usage(const char* p) {
 static void print_usage(const char* p) {
     std::cout << "Usage: " << p << " [-v VOICE] [-o FILE] TEXT...   speak TEXT (words are joined, quotes optional)\n"
                  "       echo TEXT | " << p << " [-v VOICE]       read text from stdin\n"
-                 "       " << p << " voices [open]                  list voices / open the voices folder\n"
+                 "       " << p << " voices [open|demo]             list / open the voices folder, demo: hear each voice\n"
                  "       " << p << " serve [--port N]               OpenAI-compatible HTTP server\n"
                  "       " << p << " help\n"
                  "\nFast local text-to-speech with voice cloning.\n"
@@ -3893,7 +3941,8 @@ static void print_usage(const char* p) {
                  "                          (default: alba, or $OMATTS_VOICE); \"tag/name\" like\n"
                  "                          de/juergen selects the language pack models-<tag>\n"
                  "  -o, --output FILE       write FILE instead of playing: .wav (default), .mp3 or\n"
-                 "                          .opus (those two need ffmpeg); \"-\" = WAV stream to stdout\n"
+                 "                          .opus (those two need ffmpeg); \"-\" = WAV stream to stdout,\n"
+                 "                          \"-.mp3\"/\"-.opus\" = that format to stdout\n"
                  "  -q, --quiet             no progress or status output\n"
                  "  -h, --help              this help\n"
                  "\nTuning:\n"
@@ -3985,6 +4034,7 @@ int main(int argc, char* argv[]) {
     bool selftest_leak = false;
     bool daemon_mode = false;
     bool no_daemon = false;
+    bool demo_mode = false;
     int server_port = 8080;
     int idle_exit = 300;
     float speed = 1.0f;
@@ -4008,6 +4058,10 @@ int main(int argc, char* argv[]) {
         else if (a == "-o" || a == "--output") {
             output = next();
             if (output == "-") { output.clear(); stdout_output = true; }
+            else if (output.size() > 1 && output[0] == '-' &&
+                     ((output.size() >= 4 && output.compare(output.size() - 4, 4, ".mp3") == 0) ||
+                      (output.size() >= 5 && output.compare(output.size() - 5, 5, ".opus") == 0)))
+                stdout_output = true;  // "-.mp3"/"-.opus": encoded format to stdout
         }
         else if (a == "-q" || a == "--quiet") quiet = true;
         else if (a == "--temperature") cfg.temperature = std::stof(next());
@@ -4025,6 +4079,12 @@ int main(int argc, char* argv[]) {
         else if (subcmd_ok && a == "serve") { server_mode = true; subcmd_ok = false; }
         else if (subcmd_ok && a == "voices") {
             cfg.resolve_defaults();
+            if (i + 1 < argc && std::string(argv[i + 1]) == "demo") {
+                // Falls through: the model loads once, then every voice speaks in turn.
+                i++;
+                demo_mode = true;
+                no_daemon = true;
+            } else {
             bool open = i + 1 < argc && std::string(argv[i + 1]) == "open";
             if (open) {
                 std::filesystem::create_directories(cfg.voices_dir);
@@ -4062,7 +4122,8 @@ int main(int argc, char* argv[]) {
                 std::cout << "  " << tag << ": ";
                 for (const auto& n : names) std::cout << n << (n == *names.rbegin() ? "\n" : ", ");
             }
-            return 0;
+            }
+            if (!demo_mode) return 0;
         }
         // Internal / expert flags, deliberately not in --help.
         else if (a == "--stdout") stdout_output = true;
@@ -4172,7 +4233,7 @@ int main(int argc, char* argv[]) {
             }
 #endif
         }
-        if (text.empty() && !selftest_leak && !daemon_mode) {
+        if (text.empty() && !selftest_leak && !daemon_mode && !demo_mode) {
             std::cerr << "Error: no text given.\n\n";
             print_brief_usage(argv[0]);
             return 1;
@@ -4262,12 +4323,129 @@ int main(int argc, char* argv[]) {
 #endif
         }
         else {
+            if (demo_mode) {
+                // Speak a fixed line with every voice in the voices folder,
+                // grouped by language pack so each pack's model speaks its
+                // own language.
+                std::map<std::string, std::set<std::string>> by_tag;
+                if (std::filesystem::exists(cfg.voices_dir)) {
+                    for (const auto& entry : std::filesystem::directory_iterator(cfg.voices_dir)) {
+                        if (entry.is_directory()) {
+                            std::string tag = entry.path().filename().string();
+                            if (tag[0] == '.') continue;
+                            for (const auto& v : std::filesystem::directory_iterator(entry))
+                                if (v.is_regular_file() && is_audio_ext(v.path().extension().string()))
+                                    by_tag[tag].insert(tag + "/" + v.path().stem().string());
+                        } else if (entry.is_regular_file() && is_audio_ext(entry.path().extension().string())) {
+                            by_tag[""].insert(entry.path().stem().string());
+                        }
+                    }
+                }
+                size_t voice_count = 0;
+                for (const auto& [t, ns] : by_tag) voice_count += ns.size();
+                if (voice_count == 0) {
+                    std::cerr << "No voices found in " << cfg.voices_dir << "\n";
+                    return 1;
+                }
+                // Omarchy doctrine slogans (omarchy.org/doctrine), EN + DE in
+                // parallel. Shuffled once, dealt in order: random per run, no
+                // repeats until the list is exhausted.
+                static const std::vector<std::string> slogans_en = {
+                    "Unite the nerds.",
+                    "Hold the line.",
+                    "Have some fun.",
+                    "Beauty is truth.",
+                    "Heritage is duty.",
+                    "Command is service.",
+                    "Welcome the agents.",
+                    "Perfect the computer.",
+                    "Own the machine.",
+                    "You're somebody now.",
+                    "Make Linux win the desktop.",
+                    "The malleable OS for the age of agents.",
+                    "Serious people have serious fun.",
+                    "Everything should be faster, better, prettier.",
+                    "Free and open code, yours to own.",
+                    "Show up, fix something, spread the enthusiasm.",
+                };
+                static const std::vector<std::string> slogans_de = {
+                    "Vereint die Nerds.",
+                    "Haltet die Stellung.",
+                    "Habt Spaß.",
+                    "Schönheit ist Wahrheit.",
+                    "Erbe ist Pflicht.",
+                    "Befehl ist Dienst.",
+                    "Begrüßt die Agenten.",
+                    "Macht den Computer perfekt.",
+                    "Eignet euch die Maschine an.",
+                    "Du bist jetzt jemand.",
+                    "Lasst Linux den Desktop gewinnen.",
+                    "Das formbare OS für das Zeitalter der Agenten.",
+                    "Ernste Leute haben ernsten Spaß.",
+                    "Alles soll schneller, besser, schöner sein.",
+                    "Freier und offener Code, der euch gehört.",
+                    "Packt an, verbessert etwas, verbreitet die Begeisterung.",
+                };
+                std::vector<size_t> order(slogans_en.size());
+                std::iota(order.begin(), order.end(), 0);
+                std::shuffle(order.begin(), order.end(), std::mt19937(std::random_device{}()));
+                size_t pick = 0;
+                std::unique_ptr<omatts::Omatts> pack_tts;
+                for (const auto& [tag, names] : by_tag) {
+                    // Base-pack voices use the already-loaded model; a tagged
+                    // group swaps in its language pack (alphabetical order puts
+                    // the base pack first).
+                    omatts::Omatts* speaker = &tts;
+                    if (!tag.empty()) {
+                        try { cfg.use_language_pack(tag); }
+                        catch (const std::exception& e) {
+                            std::cerr << "omatts: skipping " << tag << " voices: " << e.what() << "\n";
+                            continue;
+                        }
+                        std::cerr << "Loading models-" << tag << "...\n";
+                        pack_tts = std::make_unique<omatts::Omatts>(cfg);
+                        speaker = pack_tts.get();
+                    }
+                    for (const auto& n : names) {
+                        std::cerr << "── " << n << " ──\n";
+                        FILE* ppipe = popen(omatts::player_command(), "w");
+                        if (!ppipe) {
+                            std::cerr << "Error: could not start the audio player (pw-cat or aplay).\n";
+                            return 1;
+                        }
+                        omatts::grow_playback_pipe(ppipe);
+                        std::string spoken = n.substr(n.find('/') + 1);  // "de/juergen" -> "juergen"
+                        for (auto& c : spoken) if (c == '_') c = ' ';
+                        bool german = !tag.empty();
+                        if (german) {  // "juergen" -> "Jürgen"
+                            for (size_t k = 1; k < spoken.size(); k++)
+                                if (spoken[k] == 'u' && spoken[k + 1] == 'e') { spoken[k] = '\u00fc'; spoken.erase(k + 1, 1); break; }
+                            if (!spoken.empty()) spoken[0] = std::toupper((unsigned char)spoken[0]);
+                        } else if (!spoken.empty()) spoken[0] = std::toupper((unsigned char)spoken[0]);
+                        std::string line;
+                        if (spoken == "Dhh" || spoken == "dhh") {
+                            line = "Hi, I'm dhh. We will fix everything!";
+                        } else {
+                            size_t si = order[pick++ % order.size()];
+                            line = german ? "Hi, ich bin " + spoken + ", " + slogans_de[si]
+                                          : "Hi, I'm " + spoken + ", " + slogans_en[si];
+                        }
+                        speaker->stream(line, n, [&](const float* s, size_t cnt) {
+                            fwrite(s, sizeof(float), cnt, ppipe);
+                            fflush(ppipe);
+                            return true;
+                        });
+                        pclose(ppipe);
+                    }
+                }
+                return 0;
+            }
             omatts::Progress prog;
             t0 = std::chrono::high_resolution_clock::now();
             
             omatts::AudioData audio;
             
-            if (stdout_output && speed == 1.0f) {
+            if (stdout_output && output.empty() && speed == 1.0f) {
 #ifdef _WIN32
                 _setmode(_fileno(stdout), _O_BINARY);
 #endif
@@ -4285,7 +4463,8 @@ int main(int argc, char* argv[]) {
                 audio.sample_rate = omatts::Omatts::SR;
                 audio.samples.resize(total_samples);
             } else if (stdout_output) {
-                // speed != 1: buffer, time-stretch, then emit a complete WAV
+                // speed != 1 or encoded stdout ("-.mp3"/"-.opus"): buffer, then
+                // emit the complete result in one go.
                 prog.begin(text, !quiet);
                 tts.stream(text, voice, [&](const float* s, size_t n) {
                     audio.samples.insert(audio.samples.end(), s, s + n);
@@ -4293,8 +4472,14 @@ int main(int argc, char* argv[]) {
                     return true;
                 });
                 audio.sample_rate = omatts::Omatts::SR;
-                omatts::TTSServer::apply_speed(audio.samples, speed);
-                auto w = omatts::TTSServer::wav_encode(audio.samples.data(), audio.samples.size(), omatts::Omatts::SR);
+                if (speed != 1.0f) omatts::TTSServer::apply_speed(audio.samples, speed);
+#ifdef _WIN32
+                _setmode(_fileno(stdout), _O_BINARY);
+#endif
+                auto w = output.empty()
+                             ? omatts::TTSServer::wav_encode(audio.samples.data(), audio.samples.size(), omatts::Omatts::SR)
+                             : omatts::TTSServer::encode_output(audio.samples, output);
+                if (w.empty()) throw std::runtime_error(output + " requires ffmpeg, which was not found");
                 fwrite(w.data(), 1, w.size(), stdout);
             } else if (play_audio) {
                 FILE* ppipe = popen(omatts::player_command(), "w");
