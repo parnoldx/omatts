@@ -1534,7 +1534,6 @@ def main():
         run_quantization(output_dir)
 
         if args.language == "german":
-            add_output_gain(output_dir / "mimi_decoder_int8.onnx", 8.0)
             print(f"\nBuiltin voices (per-language embeddings)")
             print("-" * 40)
             export_builtin_voices(output_dir, args.language)
@@ -1547,8 +1546,7 @@ def main():
 
         int8_pass = True
         if (output_dir / "flow_lm_main_int8.onnx").exists():
-            int8_pass = run_validation(model, output_dir, int8=True,
-                                       decoder_gain=8.0 if args.language == "german" else 1.0)
+            int8_pass = run_validation(model, output_dir, int8=True)
 
         if not (fp32_pass and int8_pass):
             sys.exit(1)

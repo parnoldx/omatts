@@ -1710,7 +1710,11 @@ public:
         txt_ = std::make_unique<OrtSession>(env, cfg_.models_dir + "/text_conditioner.onnx", opts_full, "text_conditioner");
         main_ = std::make_unique<OrtSession>(env, cfg_.models_dir + "/flow_lm_main" + sfx + ".onnx", opts_ar, "flow_lm_main" + sfx);
         flow_ = std::make_unique<OrtSession>(env, cfg_.models_dir + "/flow_lm_flow" + (cfg_.flow_fp32 ? "" : sfx) + ".onnx", opts_ar, "flow_lm_flow" + (cfg_.flow_fp32 ? "" : sfx));
-        dec_ = std::make_unique<OrtSession>(env, cfg_.models_dir + "/mimi_decoder" + sfx + ".onnx", opts_dec, "mimi_decoder" + sfx);
+        // fp32 decoder preferred: the German int8 decoder was broken (rel~7 vs
+        // PyTorch), so packs ship fp32; fall back when only int8 exists.
+        std::string dec_file = cfg_.models_dir + "/mimi_decoder" + sfx + ".onnx";
+        if (!std::filesystem::exists(dec_file)) dec_file = cfg_.models_dir + "/mimi_decoder.onnx";
+        dec_ = std::make_unique<OrtSession>(env, dec_file, opts_dec, "mimi_decoder");
         
         main_runner_ = std::make_unique<StatefulRunner>(*main_);
         dec_runner_ = std::make_unique<StatefulRunner>(*dec_);
@@ -2089,6 +2093,11 @@ public:
             }
             
             if (out_voice_snap) *out_voice_snap = main_runner_.take_snapshot();
+            if (const char* dump = getenv("PTT_DUMP_VOICE_KV")) {
+                auto ds = main_runner_.snapshot_to_disk(*out_voice_snap);
+                if (ds.save_to_disk(dump))
+                    std::cerr << "  dumped voice KV snapshot to " << dump << "\n";
+            }
             
             {
                 auto _ = g_prof.time("text_conditioning_pass");
@@ -2195,6 +2204,10 @@ public:
             
             std::copy(fx_.begin(), fx_.end(), cl_.begin());
             idx_++;
+            if (const char* lp = getenv("PTT_DUMP_LATENTS")) {
+                FILE* lf = fopen(lp, "ab");
+                if (lf) { fwrite(fx_.data(), 4, 32, lf); fclose(lf); }
+            }
             return Tensor({fx_.begin(), fx_.end()}, {1, 1, 32});
         }
         
