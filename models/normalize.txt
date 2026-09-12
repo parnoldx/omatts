@@ -1,0 +1,18 @@
+# English text normalization rules. One rule per line: regex<TAB>replacement
+# (std::regex syntax, all matches per rule, rules run in order). '#' comments.
+# Copied into the model pack dir (models/ or ~/.local/share/omatts/models) by
+# install; missing file = no text normalization at all.
+# Known corners: "2023/24" reads "divided by", "555-1234" reads "minus".
+\$ ?([0-9][0-9,]*(?:\.[0-9]+)?)	$1 dollars 
+€ ?([0-9][0-9,]*(?:\.[0-9]+)?)	$1 euros 
+£ ?([0-9][0-9,]*(?:\.[0-9]+)?)	$1 pounds 
+([0-9]) ?%	$1 percent 
+([0-9]) ?° ?C	$1 degrees Celsius 
+([0-9]) ?° ?F	$1 degrees Fahrenheit 
+([0-9]) ?\* ?([0-9])	$1 times $2
+([0-9]) ?- ?([0-9])	$1 minus $2
+([0-9]) ?/ ?(?=[0-9])	$1 divided by 
+/	 slash 
+@	 at 
+([0-9])\+([0-9])	$1 plus $2
+\s*&\s*	 and 

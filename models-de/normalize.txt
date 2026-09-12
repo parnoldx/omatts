@@ -1,0 +1,15 @@
+# German text normalization rules (models-de). Same format as
+# models/normalize.txt; replaces it entirely when this pack is active.
+\$ ?([0-9][0-9,]*(?:\.[0-9]+)?)	$1 Dollar
+€ ?([0-9][0-9,]*(?:\.[0-9]+)?)	$1 Euro
+£ ?([0-9][0-9,]*(?:\.[0-9]+)?)	$1 Pfund
+([0-9]) ?%	$1 Prozent
+([0-9]) ?° ?C	$1 Grad Celsius
+([0-9]) ?° ?F	$1 Grad Fahrenheit
+([0-9]) ?\* ?([0-9])	$1 mal $2
+([0-9]) ?- ?([0-9])	$1 minus $2
+([0-9]) ?/ ?(?=[0-9])	$1 geteilt durch 
+/	 Schrägstrich 
+@	 at 
+([0-9])\+([0-9])	$1 plus $2
+&	 und 

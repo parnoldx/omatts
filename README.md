@@ -39,22 +39,22 @@ later calls start in milliseconds. It exits after 5 idle minutes.
 
 In-text pauses: `[[pause N]]` inserts N seconds of silence (default `0.5` with
 no number, clamped to 0–10); works on stdin, `-o`, and the HTTP API.
-Common symbols are spoken out: `$100` → "100 dollars", `50%` → "50 percent",
-`&` → "and", plus `€`, `£`, `°C`, `°F`, digit `+`/`-`/`*` → plus/minus/times,
-`/` → "divided by" between digits or "slash" elsewhere, `@` → "at".
 
-Symbol rules are per language pack: a `normalize.txt` in the model pack dir
-(`models/`, `models-de/`, …) replaces the built-in English defaults. One rule
-per line, `regex<TAB>replacement` (std::regex syntax, rules run in order),
-`#` comments; broken lines are skipped with a warning. Rules reload when a
-voice tag like `de/juergen` switches the pack. Example `models-de/normalize.txt`:
+Symbol rules are per language pack and versioned in the repo:
+`models/normalize.txt` (English) and `models-de/normalize.txt` (German) —
+they speak `$100` out as "100 dollars", `50%` as "50 percent", `&` as "and",
+plus `€`, `£`, `°C`, `°F`, digit `+`/`-`/`*` → plus/minus/times,
+`/` → "divided by" between digits or "slash" elsewhere, `@` → "at";
+German says "Dollar/Euro/Prozent/Grad Celsius".
 
-    # German text rules
-    \$ ?([0-9][0-9,]*(?:\.[0-9]+)?)	$1 Dollar
-    € ?([0-9][0-9,]*(?:\.[0-9]+)?)	$1 Euro
+Format: one rule per line, `regex<TAB>replacement` (std::regex syntax,
+rules run in order), `#` comments; broken lines are skipped with a warning.
+**No `normalize.txt` in a pack = no symbol expansion for that pack** — the
+feature is opt-in per language, never built in. Rules reload when a voice
+tag like `de/juergen` switches the pack. Example:
+
     ([0-9]) ?%	$1 Prozent
-    &	 und 
-    ([0-9]) ?° ?C	$1 Grad Celsius
+    € ?([0-9][0-9,]*(?:\.[0-9]+)?)	$1 Euro
 
 More:
 

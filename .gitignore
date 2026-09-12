@@ -11,9 +11,12 @@ libonnxruntime.so*
 *.exe
 
 # ONNX models (too large for git — produced by export_onnx.py)
-models/
+models/*
+# but the text rules are versioned with the repo
+!models/normalize.txt
 models-german/
 models-de/*
+!models-de/normalize.txt
 # German pack's shipped voices are committed (weights never are)
 !models-de/voices-de/
 

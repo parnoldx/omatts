@@ -449,35 +449,18 @@ static bool load_norm_rules(std::istream& in, const char* source) {
     return true;
 }
 
-// Load the rules for a language pack. Missing/broken file -> English defaults;
-// generation never fails over text cosmetics.
+// Load the rules for a language pack. Rules are versioned per pack in the
+// repo (models/normalize.txt, models-de/normalize.txt, …) and copied into the
+// installation dirs. No file (or a file with no valid rules) -> no text
+// normalization; the feature is opt-in per pack, never fails generation.
 static void init_norm_rules(const std::string& models_dir) {
-    static const char* DEFAULTS =
-        "# Built-in English defaults (see also the normalize.txt docs in README.md)\n"
-        "\\$([0-9][0-9,]*(?:\\.[0-9]+)?)\t$1 dollars \n"
-        "€ ?([0-9][0-9,]*(?:\\.[0-9]+)?)\t$1 euros \n"
-        "£ ?([0-9][0-9,]*(?:\\.[0-9]+)?)\t$1 pounds \n"
-        "([0-9]) ?%\t$1 percent \n"
-        "([0-9]) ?° ?C\t$1 degrees Celsius \n"
-        "([0-9]) ?° ?F\t$1 degrees Fahrenheit \n"
-        "([0-9]) ?\\* ?([0-9])\t$1 times $2\n"
-        "([0-9]) ?- ?([0-9])\t$1 minus $2\n"
-        // division vs slash: between digits it's math (lookahead keeps the 2nd
-        // digit), otherwise a slash. "2023/24" says 'divided by' — known corner.
-        "([0-9]) ?/ ?(?=[0-9])\t$1 divided by \n"
-        "/\t slash \n"
-        "@\t at \n"
-        "([0-9])\\+([0-9])\t$1 plus $2\n"
-        "\\s*&\\s*\t and \n";
-    std::istringstream defaults(DEFAULTS);
-    if (load_norm_rules(defaults, "built-in defaults")) {
-        std::ifstream f(models_dir + "/normalize.txt");
-        if (f) load_norm_rules(f, (models_dir + "/normalize.txt").c_str());
-    }
+    g_norm_rules.clear();  // pack switches must not inherit the previous pack's rules
+    std::ifstream f(models_dir + "/normalize.txt");
+    if (f) load_norm_rules(f, (models_dir + "/normalize.txt").c_str());
 }
 
 static std::string normalize_symbols(const std::string& s) {
-    if (g_norm_rules.empty()) init_norm_rules("");  // direct callers before pack config
+    if (g_norm_rules.empty()) return s;
     std::string out = s;
     for (auto& r : g_norm_rules)
         out = std::regex_replace(out, r.re, r.repl);
@@ -4072,6 +4055,12 @@ int main(int argc, char* argv[]) {
         // Internal / expert flags, deliberately not in --help.
         else if (a == "--stdout") stdout_output = true;
         else if (a == "--selftest-text") {  // internal: text normalization check
+            cfg.resolve_defaults();  // test the pack's real rules file
+            omatts::init_norm_rules(cfg.models_dir);
+            if (omatts::g_norm_rules.empty()) {
+                std::cerr << "selftest-text: no rules in " << cfg.models_dir << "/normalize.txt\n";
+                return 2;
+            }
             struct Case { const char* in; const char* must_contain; };
             const Case cases[] = {
                 {"It costs $100.", "100 dollars"},
@@ -4099,7 +4088,7 @@ int main(int argc, char* argv[]) {
                     return 2;
                 }
             }
-            // Rules-file mode: a custom set REPLACES the defaults; bad lines are skipped.
+            // Rules-file mode: a custom set REPLACES the active one; bad lines are skipped.
             {
                 std::istringstream custom("# test\nZZZ+\tmooh \nbad line without tab\n([0-9]) ?%\t$1 Prozent \n");
                 if (!omatts::load_norm_rules(custom, "selftest")) { std::cerr << "selftest-text FAIL: rules load\n"; return 2; }
