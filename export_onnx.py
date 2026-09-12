@@ -37,7 +37,6 @@ import argparse
 import copy
 import logging
 import math
-import struct
 import sys
 import warnings
 from collections import OrderedDict
@@ -274,60 +273,6 @@ class TextConditionerWrapper(nn.Module):
 
 # ============================================================================
 # Language Metadata (consumed by pocket_tts.cpp)
-# ============================================================================
-
-def export_builtin_voices(output_dir: Path, language: str):
-    """Convert Kyutai's shipped per-language voice embeddings into the C++
-    runtime's native .kv format (KV-cache snapshots of the flow_lm transformer
-    after voice conditioning).
-
-    For languages whose public weights ship a zeroed Mimi encoder (e.g. German
-    "without-voice-cloning"), WAV voice cloning is impossible — these
-    precomputed embeddings are the only voices. C++ resolves bare voice names
-    against <models_dir>/embeddings/<name>.kv before falling back to WAVs.
-    """
-    import json
-    import safetensors.torch as st
-
-    api = (f"https://huggingface.co/api/models/kyutai/pocket-tts-without-voice-cloning"
-           f"/tree/main/languages/{language}/embeddings")
-    with urlopen_fn(Request(api, headers={"User-Agent": "pocket-tts-export"})) as r:
-        entries = json.load(r)
-
-    vdir = output_dir / "embeddings"
-    vdir.mkdir(exist_ok=True)
-    FLOAT16, INT64 = 10, 7  # ONNX tensor element types
-    for e in entries:
-        name = e["path"].split("/")[-1].removesuffix(".safetensors")
-        dst = vdir / f"{name}.kv"
-        if dst.exists():
-            print(f"  ✓ embeddings/{name}.kv (cached)")
-            continue
-        src = output_dir / ".cache" / f"voice-{name}.safetensors"
-        if not src.exists():
-            _download(
-                f"https://huggingface.co/kyutai/pocket-tts-without-voice-cloning"
-                f"/resolve/main/languages/{language}/embeddings/{name}.safetensors",
-                src,
-            )
-        sd = st.load_file(src)
-        # DiskSnapshot blob: [int32 current_buf][int32 n_states], per state:
-        # [int32 ndims][ndims*int64 shape][int32 ort_type][int64 nbytes][data]
-        blob = struct.pack("<ii", 1, 18)  # current_buf=1 (post voice pass), 18 states
-        for i in range(6):
-            cache = sd[f"transformer.layers.{i}.self_attn/cache"].numpy().astype(np.float16)
-            off = int(sd[f"transformer.layers.{i}.self_attn/offset"].item())
-            for t, typ in ((cache[0], FLOAT16), (cache[1], FLOAT16),
-                           (np.array([off], dtype=np.int64), INT64)):
-                t = np.ascontiguousarray(t)
-                blob += struct.pack("<i", t.ndim)
-                blob += struct.pack(f"<{t.ndim}q", *t.shape)
-                blob += struct.pack("<iq", typ, t.nbytes)
-                blob += t.tobytes()
-        with open(dst, "wb") as f:
-            f.write(struct.pack("<IQ", 0x3143564B, len(blob)))  # "KVC1" magic
-            f.write(blob)
-        print(f"  ✓ embeddings/{name}.kv")
 
 
 def export_language_meta(model: TTSModel, output_dir: Path, language: str = "english"):
@@ -1549,10 +1494,12 @@ def main():
 
         run_quantization(output_dir)
 
-        if args.language == "german":
-            print(f"\nBuiltin voices (per-language embeddings)")
-            print("-" * 40)
-            export_builtin_voices(output_dir, args.language)
+        # Builtin preconditioned voices (export_builtin_voices) deliberately not
+        # exported: German voices are plain WAV clones in voices/de/, and the
+        # .kv embeddings were calibrated for the pre-hotfix gain-folded decoder
+        # — with the stripped decoder they play ~13 dB too quiet, and the
+        # builtin-KV lookup would shadow the WAV voices (see omatts.cpp
+        # resolve_builtin_kv). Re-add only if builtin KV voices are ever wanted.
 
         externalize_models(output_dir)
         trim_to_default_variant(output_dir, keep_fp32_decoder=(args.language == "german"))
