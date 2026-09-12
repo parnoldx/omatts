@@ -3261,6 +3261,43 @@ static size_t grow_playback_pipe(FILE* p) {
 #endif
 }
 
+// Accent color for the progress UI. Follows the Omarchy theme's accent when one
+// is configured; OMATTS_ACCENT (hex, e.g. "#7fbbb3") overrides; otherwise the
+// legacy pink. Computed once per run — theme changes apply to the next run.
+static std::string accent_sgr() {
+    static const std::string seq = [] {
+        std::string hex;
+        if (const char* e = getenv("OMATTS_ACCENT")) hex = e;
+        if (hex.empty()) {
+            if (const char* home = getenv("HOME")) {
+                std::ifstream tf(std::string(home) + "/.local/state/omarchy/current/theme.name");
+                std::string slug;
+                if (std::getline(tf, slug)) {
+                    while (!slug.empty() && (slug.back() == '\r' || slug.back() == ' ')) slug.pop_back();
+                    const std::string bases[] = {std::string(home) + "/.config/omarchy/themes/", "/usr/share/omarchy/themes/"};
+                    for (const std::string& base : bases) {
+                        std::ifstream f(base + slug + "/colors.toml");
+                        std::string line;
+                        while (std::getline(f, line))
+                            if (line.rfind("accent", 0) == 0) {
+                                size_t h = line.find('#');
+                                if (h != std::string::npos && line.size() >= h + 7) { hex = line.substr(h, 7); break; }
+                            }
+                        if (!hex.empty()) break;
+                    }
+                }
+            }
+        }
+        if (hex.size() == 7 && hex[0] == '#' &&
+            hex.find_first_not_of("0123456789abcdefABCDEF", 1) == std::string::npos) {
+            auto val = [&hex](size_t i) { return std::stoi(hex.substr(i, 2), nullptr, 16); };
+            return "38;2;" + std::to_string(val(1)) + ";" + std::to_string(val(3)) + ";" + std::to_string(val(5));
+        }
+        return std::string("38;5;212");
+    }();
+    return "\033[" + seq + "m";
+}
+
 // Live generation progress. Real length is unknown until EOS, so the bar is
 // scaled to a word-count estimate and clamps at 100% — a courtesy indicator,
 // not a contract. Drawn on stderr only when it's a tty (and not --quiet/--stdout).
@@ -3405,8 +3442,8 @@ struct Progress {
         if (part > 7) part = 7;
         if (full == W) part = 0;
 
-        std::cerr << "\r\033[38;5;212m" << SPIN[frame % 10] << "\033[0m \033[1mSpeaking...\033[0m ";
-        std::cerr << "\033[38;5;212m";
+        std::cerr << "\r" << accent_sgr() << SPIN[frame % 10] << "\033[0m \033[1mSpeaking...\033[0m ";
+        std::cerr << accent_sgr();
         for (int i = 0; i < full; ++i) std::cerr << "\u2588";
         if (part > 0) std::cerr << EIGHTH[part];
         std::cerr << "\033[2m";
