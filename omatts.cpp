@@ -79,6 +79,7 @@
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <random>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -1701,16 +1702,22 @@ public:
         }
         
         auto& env = get_ort_env();
-        std::string sfx = cfg_.precision == "int8" ? "_int8" : "";
+        // Per-model suffix: prefer _int8 when the pack ships it, fall back to
+        // fp32 otherwise (the German pack has no int8 mimi_decoder).
+        auto pick_sfx = [&](const char* base) {
+            return std::filesystem::exists(cfg_.models_dir + "/" + base + "_int8.onnx") ? std::string("_int8") : std::string();
+        };
+        std::string main_sfx = pick_sfx("flow_lm_main");
+        std::string dec_sfx = pick_sfx("mimi_decoder");
         
         // Lazy: the encoder session is only needed on voice-cache miss (~70ms
         // load); cache-hit calls (the common case for the CLI) skip it entirely.
         enc_file_ = std::filesystem::exists(cfg_.models_dir + "/mimi_encoder.onnx");
         if (enc_file_) enc_threads_ = threads_full;
         txt_ = std::make_unique<OrtSession>(env, cfg_.models_dir + "/text_conditioner.onnx", opts_full, "text_conditioner");
-        main_ = std::make_unique<OrtSession>(env, cfg_.models_dir + "/flow_lm_main" + sfx + ".onnx", opts_ar, "flow_lm_main" + sfx);
-        flow_ = std::make_unique<OrtSession>(env, cfg_.models_dir + "/flow_lm_flow" + (cfg_.flow_fp32 ? "" : sfx) + ".onnx", opts_ar, "flow_lm_flow" + (cfg_.flow_fp32 ? "" : sfx));
-        dec_ = std::make_unique<OrtSession>(env, cfg_.models_dir + "/mimi_decoder" + sfx + ".onnx", opts_dec, "mimi_decoder" + sfx);
+        main_ = std::make_unique<OrtSession>(env, cfg_.models_dir + "/flow_lm_main" + main_sfx + ".onnx", opts_ar, "flow_lm_main" + main_sfx);
+        flow_ = std::make_unique<OrtSession>(env, cfg_.models_dir + "/flow_lm_flow" + (cfg_.flow_fp32 ? "" : pick_sfx("flow_lm_flow")) + ".onnx", opts_ar, "flow_lm_flow" + (cfg_.flow_fp32 ? "" : pick_sfx("flow_lm_flow")));
+        dec_ = std::make_unique<OrtSession>(env, cfg_.models_dir + "/mimi_decoder" + dec_sfx + ".onnx", opts_dec, "mimi_decoder" + dec_sfx);
         
         main_runner_ = std::make_unique<StatefulRunner>(*main_);
         dec_runner_ = std::make_unique<StatefulRunner>(*dec_);
@@ -4093,8 +4100,10 @@ int main(int argc, char* argv[]) {
         }
         else {
             if (demo_mode) {
-                // Speak a fixed line with every voice in the voices folder.
-                std::set<std::string> names;
+                // Speak a fixed line with every voice in the voices folder,
+                // grouped by language pack so each pack's model speaks its
+                // own language.
+                std::map<std::string, std::set<std::string>> by_tag;
                 if (std::filesystem::exists(cfg.voices_dir)) {
                     for (const auto& entry : std::filesystem::directory_iterator(cfg.voices_dir)) {
                         if (entry.is_directory()) {
@@ -4102,32 +4111,108 @@ int main(int argc, char* argv[]) {
                             if (tag[0] == '.') continue;
                             for (const auto& v : std::filesystem::directory_iterator(entry))
                                 if (v.is_regular_file() && is_audio_ext(v.path().extension().string()))
-                                    names.insert(tag + "/" + v.path().stem().string());
+                                    by_tag[tag].insert(tag + "/" + v.path().stem().string());
                         } else if (entry.is_regular_file() && is_audio_ext(entry.path().extension().string())) {
-                            names.insert(entry.path().stem().string());
+                            by_tag[""].insert(entry.path().stem().string());
                         }
                     }
                 }
-                if (names.empty()) {
+                size_t voice_count = 0;
+                for (const auto& [t, ns] : by_tag) voice_count += ns.size();
+                if (voice_count == 0) {
                     std::cerr << "No voices found in " << cfg.voices_dir << "\n";
                     return 1;
                 }
-                for (const auto& n : names) {
-                    std::cerr << "── " << n << " ──\n";
-                    FILE* ppipe = popen(omatts::player_command(), "w");
-                    if (!ppipe) {
-                        std::cerr << "Error: could not start the audio player (pw-cat or aplay).\n";
-                        return 1;
+                // Omarchy doctrine slogans (omarchy.org/doctrine), EN + DE in
+                // parallel. Shuffled once, dealt in order: random per run, no
+                // repeats until the list is exhausted.
+                static const std::vector<std::string> slogans_en = {
+                    "Unite the nerds.",
+                    "Hold the line.",
+                    "Have some fun.",
+                    "Beauty is truth.",
+                    "Heritage is duty.",
+                    "Command is service.",
+                    "Welcome the agents.",
+                    "Perfect the computer.",
+                    "Own the machine.",
+                    "You're somebody now.",
+                    "Make Linux win the desktop.",
+                    "The malleable OS for the age of agents.",
+                    "Serious people have serious fun.",
+                    "Everything should be faster, better, prettier.",
+                    "Free and open code, yours to own.",
+                    "Show up, fix something, spread the enthusiasm.",
+                };
+                static const std::vector<std::string> slogans_de = {
+                    "Vereint die Nerds.",
+                    "Haltet die Stellung.",
+                    "Habt Spaß.",
+                    "Schönheit ist Wahrheit.",
+                    "Erbe ist Pflicht.",
+                    "Befehl ist Dienst.",
+                    "Begrüßt die Agenten.",
+                    "Macht den Computer perfekt.",
+                    "Eignet euch die Maschine an.",
+                    "Du bist jetzt jemand.",
+                    "Lasst Linux den Desktop gewinnen.",
+                    "Das formbare OS für das Zeitalter der Agenten.",
+                    "Ernste Leute haben ernsten Spaß.",
+                    "Alles soll schneller, besser, schöner sein.",
+                    "Freier und offener Code, der euch gehört.",
+                    "Packt an, verbessert etwas, verbreitet die Begeisterung.",
+                };
+                std::vector<size_t> order(slogans_en.size());
+                std::iota(order.begin(), order.end(), 0);
+                std::shuffle(order.begin(), order.end(), std::mt19937(std::random_device{}()));
+                size_t pick = 0;
+                std::unique_ptr<omatts::Omatts> pack_tts;
+                for (const auto& [tag, names] : by_tag) {
+                    // Base-pack voices use the already-loaded model; a tagged
+                    // group swaps in its language pack (alphabetical order puts
+                    // the base pack first).
+                    omatts::Omatts* speaker = &tts;
+                    if (!tag.empty()) {
+                        try { cfg.use_language_pack(tag); }
+                        catch (const std::exception& e) {
+                            std::cerr << "omatts: skipping " << tag << " voices: " << e.what() << "\n";
+                            continue;
+                        }
+                        std::cerr << "Loading models-" << tag << "...\n";
+                        pack_tts = std::make_unique<omatts::Omatts>(cfg);
+                        speaker = pack_tts.get();
                     }
-                    omatts::grow_playback_pipe(ppipe);
-                    std::string spoken = n.substr(n.find('/') + 1);  // "de/juergen" -> "juergen"
-                    tts.stream("Hi, I'm " + spoken + ". Add me to your voices folder and I'll read anything you like.",
-                               n, [&](const float* s, size_t cnt) {
-                                   fwrite(s, sizeof(float), cnt, ppipe);
-                                   fflush(ppipe);
-                                   return true;
-                               });
-                    pclose(ppipe);
+                    for (const auto& n : names) {
+                        std::cerr << "── " << n << " ──\n";
+                        FILE* ppipe = popen(omatts::player_command(), "w");
+                        if (!ppipe) {
+                            std::cerr << "Error: could not start the audio player (pw-cat or aplay).\n";
+                            return 1;
+                        }
+                        omatts::grow_playback_pipe(ppipe);
+                        std::string spoken = n.substr(n.find('/') + 1);  // "de/juergen" -> "juergen"
+                        for (auto& c : spoken) if (c == '_') c = ' ';
+                        bool german = !tag.empty();
+                        if (german) {  // "juergen" -> "Jürgen"
+                            for (size_t k = 1; k < spoken.size(); k++)
+                                if (spoken[k] == 'u' && spoken[k + 1] == 'e') { spoken[k] = '\u00fc'; spoken.erase(k + 1, 1); break; }
+                            if (!spoken.empty()) spoken[0] = std::toupper((unsigned char)spoken[0]);
+                        } else if (!spoken.empty()) spoken[0] = std::toupper((unsigned char)spoken[0]);
+                        std::string line;
+                        if (spoken == "Dhh" || spoken == "dhh") {
+                            line = "Hi, I'm dhh. We will fix everything!";
+                        } else {
+                            size_t si = order[pick++ % order.size()];
+                            line = german ? "Hi, ich bin " + spoken + ", " + slogans_de[si]
+                                          : "Hi, I'm " + spoken + ", " + slogans_en[si];
+                        }
+                        speaker->stream(line, n, [&](const float* s, size_t cnt) {
+                            fwrite(s, sizeof(float), cnt, ppipe);
+                            fflush(ppipe);
+                            return true;
+                        });
+                        pclose(ppipe);
+                    }
                 }
                 return 0;
             }
