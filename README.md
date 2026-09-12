@@ -133,6 +133,12 @@ them; `--no-cache` disables them entirely.
 make deploy  # exports models, builds, packs dist/, publishes the release
 ```
 
+Unit tests (pure logic — text chunking, tags, JSON, caches; no models needed):
+
+```bash
+make test
+```
+
 `make deploy` runs `export_onnx.py`, which exports, quantizes, and validates all
 ONNX models from the upstream weights (requires
 [uv](https://docs.astral.sh/uv/); it pins a pocket-tts commit because newer

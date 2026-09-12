@@ -793,8 +793,11 @@ static std::string get_cache_path(const std::string& voices_dir, const std::stri
     // caches (bit us once: zeroed-encoder era caches survived a model swap).
     // Externalized models keep weights in the .data sidecar; sum both mtimes so
     // a weight-only swap (graph unchanged) still bumps the tag.
+    // The full voice path is mixed in too: two voices with the same basename in
+    // different subdirs must not share cache entries.
     uint64_t h = 14695981039346656037ull;
     for (char c : models_dir) { h ^= (unsigned char)c; h *= 1099511628211ull; }
+    for (char c : voice_path) { h ^= (unsigned char)c; h *= 1099511628211ull; }
     time_t mt = get_mtime(models_dir + "/flow_lm_main_int8.onnx") +
                 get_mtime(models_dir + "/flow_lm_main_int8.onnx.data");
     if (mt) {
@@ -850,19 +853,20 @@ static bool load_embedding(const std::string& path, std::vector<int64_t>& shape,
     uint32_t magic;
     int32_t ndims;
     
-    f.read(reinterpret_cast<char*>(&magic), 4);
+    if (!f.read(reinterpret_cast<char*>(&magic), 4)) return false;
     if (magic != EMB_MAGIC) return false;
     
-    f.read(reinterpret_cast<char*>(&ndims), 4);
+    if (!f.read(reinterpret_cast<char*>(&ndims), 4)) return false;
     if (ndims <= 0 || ndims > 10) return false;
     
     shape.resize(ndims);
-    f.read(reinterpret_cast<char*>(shape.data()), ndims * sizeof(int64_t));
+    if (!f.read(reinterpret_cast<char*>(shape.data()), ndims * sizeof(int64_t))) return false;
     
     size_t numel = 1;
     for (int32_t i = 0; i < ndims; ++i) {
         if (shape[i] <= 0) return false;
-        numel *= shape[i];
+        numel *= size_t(shape[i]);
+        if (numel > (1u << 26)) return false;  // real embeddings are ~MBs; corrupt file guard
     }
     
     data.resize(numel);
@@ -1438,10 +1442,19 @@ struct StateBufferIO {
     
     void restore_from_disk(const DiskSnapshot& ds) {
         const uint8_t* p = ds.blob.data();
-        auto read = [&](void* dst, size_t bytes) { memcpy(dst, p, bytes); p += bytes; };
+        const uint8_t* blob_end = ds.blob.data() + ds.blob.size();
+        auto read = [&](void* dst, size_t bytes) {
+            if (size_t(blob_end - p) < bytes) throw std::runtime_error("corrupt voice KV cache (truncated)");
+            memcpy(dst, p, bytes); p += bytes;
+        };
+        auto need = [&](size_t bytes) {
+            if (size_t(blob_end - p) < bytes) throw std::runtime_error("corrupt voice KV cache (truncated)");
+        };
         
         int32_t cb, ns;
         read(&cb, 4); read(&ns, 4);
+        if (ns < 0 || size_t(ns) != names.size()) throw std::runtime_error("corrupt voice KV cache (state count)");
+        if (cb < 0 || cb > 1) cb = 0;
         current_buf = cb;
         int b = in_buf();
         
@@ -1455,14 +1468,17 @@ struct StateBufferIO {
             read(&data_bytes, 8);
             
             if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+                need(data_bytes);
                 size_t count = data_bytes / 8;
                 auto* src = reinterpret_cast<const int64_t*>(p);
                 i64[b][i].assign(src, src + count);
                 p += data_bytes;
             } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL) {
+                need(data_bytes);
                 b8[b][i].assign(p, p + data_bytes);
                 p += data_bytes;
             } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+                need(data_bytes);
                 bool sliced = !init_shapes.empty() && loaded_shape != init_shapes[i];
                 if (sliced) {
                     size_t full_size = 1;
@@ -1493,6 +1509,7 @@ struct StateBufferIO {
                     p += data_bytes;
                 }
             } else {
+                need(data_bytes);
                 bool sliced = !init_shapes.empty() && loaded_shape != init_shapes[i];
                 if (sliced) {
                     size_t full_size = 1;
@@ -1575,6 +1592,7 @@ public:
                 if (state_.types[j] == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) { l.v = j; break; }
             for (size_t j = l.v + 1; j < state_.names.size(); ++j)
                 if (state_.types[j] == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) { l.step = j; break; }
+            if (l.v == 0 || l.step == 0) continue;  // unpaired layout: skip fixup (and don't loop forever)
             layers.push_back(l);
             i = l.v; // skip V, already paired
         }
@@ -1677,6 +1695,7 @@ public:
                 int64_t old_step = state_.i64[state_.in_buf()][f.step_state_idx][0];
                 int64_t new_step = state_.i64[state_.out_buf()][f.step_state_idx][0];
                 int64_t L = new_step - old_step;
+                if (L <= 0) continue;  // defensive: step regression or no progress, nothing to copy
                 int64_t start = ((old_step % f.capacity) + f.capacity) % f.capacity;
                 if (start + L <= f.capacity) {
                     std::memcpy(our_ptr + start * f.per_pos,
@@ -1895,6 +1914,8 @@ public:
         else if (ext == ".flac") drflac_free(raw, nullptr);
         else drwav_free(raw, nullptr);
         
+        if (mono.empty()) throw std::runtime_error("Audio file has no samples: " + path);
+        
         if (sr != SR) {
             auto _ = g_prof.time("resample");
             mono = resample(mono, sr, SR);
@@ -2070,6 +2091,8 @@ private:
     std::vector<std::pair<float, float>> st_values_;
     float dt_;
     std::unordered_map<std::string, Tensor> vcache_;
+    bool voice_via_path_ = false;  // set by get_voice: the next tensor voice came from a named path
+    std::mutex engine_mtx_;        // serializes generate/stream (single engine; HTTP already locks outside)
 
 public:
     // (public) voice resolution used by the daemon's request validation
@@ -2092,6 +2115,7 @@ public:
     
     const Tensor& get_voice(const std::string& p) {
         voice_kv_path_ = p;
+        voice_via_path_ = true;  // mark: the upcoming tensor voice is identified by this path
         auto it = vcache_.find(p);
         if (it != vcache_.end()) return it->second;
         
@@ -2190,7 +2214,7 @@ public:
             }
             
             if (out_voice_snap) *out_voice_snap = main_runner_.take_snapshot();
-            if (const char* dump = getenv("PTT_DUMP_VOICE_KV")) {
+            if (const char* dump = getenv("PTT_DUMP_VOICE_KV"); dump && out_voice_snap) {
                 auto ds = main_runner_.snapshot_to_disk(*out_voice_snap);
                 if (ds.save_to_disk(dump))
                     std::cerr << "  dumped voice KV snapshot to " << dump << "\n";
@@ -2499,6 +2523,15 @@ AudioData Omatts::generate(const std::string& text, const Tensor& voice, int max
 
 void Omatts::stream(const std::string& text, const Tensor& voice, StreamCallback cb, int max_frames,
                        const std::string& builtin_kv) {
+    // A raw tensor voice has no path identity: drop any stale path from a
+    // previous named-voice call, or tier 1 would restore THAT voice's KV
+    // snapshot and silently ignore this tensor (bit warmup and the Tensor API).
+    if (!voice_via_path_) voice_kv_path_.clear();
+    voice_via_path_ = false;
+
+    // ponytail: one engine mutex serializes whole streams; per-sentence
+    // interleaving between two C-API streams would need real session isolation.
+    std::lock_guard<std::mutex> engine_lock(engine_mtx_);
     SilenceGate gate(cb);  // decoder audio routes through the gate; [[pause]] silence bypasses it
     auto sentences = sentences_with_pauses(text);
     
@@ -2660,10 +2693,13 @@ struct HttpRequest {
                 
                 if (cl_pos != std::string::npos) {
                     size_t cl_end = data.find("\r\n", cl_pos);
-                    int content_length = std::stoi(data.substr(cl_pos + 15, cl_end - cl_pos - 15));
+                    long content_length = 0;
+                    try { content_length = std::stol(data.substr(cl_pos + 15, cl_end - cl_pos - 15)); }
+                    catch (const std::exception&) { /* garbage header -> treated as absent */ }
+                    if (content_length > 64 * 1024 * 1024) content_length = 0;  // abusive: drop the body
                     size_t body_start = header_end + 4;
                     
-                    while (data.size() < body_start + content_length) {
+                    while (content_length > 0 && data.size() < body_start + size_t(content_length)) {
                         n = recv(client_fd, buf, (int)sizeof(buf), 0);
                         if (n <= 0) break;
                         data.append(buf, n);
@@ -3209,6 +3245,32 @@ public:
 };
 
 // ════════════════════════════════════════════════════════════════════════════
+// ── JSON / hash helpers (shared by the HTTP server and the daemon) ──────────
+
+static std::string json_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 8);
+    for (char c : s) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:   out += c;
+        }
+    }
+    return out;
+}
+
+static std::string fnv1a_hex(const std::string& s) {
+    uint64_t h = 14695981039346656037ULL;  // FNV-1a 64 offset basis
+    for (unsigned char c : s) { h ^= c; h *= 1099511628211ULL; }
+    char buf[17];
+    snprintf(buf, sizeof(buf), "%016llx", (unsigned long long)h);
+    return buf;
+}
+
 // Idle daemon: a resident Omatts behind a unix socket. The CLI probes the
 // socket first; if a daemon answers, generation happens there (model loaded
 // once, reused until idle-exit). If not, the CLI generates locally and spawns
@@ -3524,22 +3586,6 @@ static bool player_write(FILE* ppipe, const void* data, size_t bytes, Progress* 
     return true;
 }
 
-static std::string json_escape(const std::string& s) {
-    std::string out;
-    out.reserve(s.size() + 8);
-    for (char c : s) {
-        switch (c) {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
-            default:   out += c;
-        }
-    }
-    return out;
-}
-
 static bool daemon_send_all(ptt_socket_t fd, const char* data, size_t len) {
     while (len) {
         ssize_t n = send(fd, data, len, 0);  // SIGPIPE ignored by daemon/client
@@ -3548,14 +3594,6 @@ static bool daemon_send_all(ptt_socket_t fd, const char* data, size_t len) {
         len -= (size_t)n;
     }
     return true;
-}
-
-static std::string fnv1a_hex(const std::string& s) {
-    uint64_t h = 1469598103934665603ULL;
-    for (unsigned char c : s) { h ^= c; h *= 1099511628211ULL; }
-    char buf[17];
-    snprintf(buf, sizeof(buf), "%016llx", (unsigned long long)h);
-    return buf;
 }
 
 // Socket name is derived from the effective config, so two differently-
@@ -4019,77 +4057,6 @@ void ptt_stream_end(void* stream_ctx) {
 
 } // extern "C"
 
-// ════════════════════════════════════════════════════════════════════════════
-// CLI + HTTP Server Entry Point
-// ════════════════════════════════════════════════════════════════════════════
-
-#ifndef PTT_SHARED_LIB
-
-static void signal_handler(int sig) {
-    (void)sig;
-    omatts::g_server_running = false;
-    if (omatts::g_server_fd != PTT_INVALID_SOCKET) {
-        ptt_close(omatts::g_server_fd);
-        omatts::g_server_fd = PTT_INVALID_SOCKET;
-    }
-    std::cout << "\nShutting down...\n";
-}
-
-static void print_brief_usage(const char* p) {
-    std::cout << "Usage: " << p << " [-v VOICE] [-o FILE] TEXT...\n"
-                 "\n"
-                 "  " << p << " Hello world              # speak (default voice: alba)\n"
-                 "  " << p << " -v dhh Hello world       # pick a voice  (list: " << p << " voices)\n"
-                 "  " << p << " -o out.wav Hello world   # write a WAV file instead of playing (-o - = stdout)\n"
-                 "  echo \"Task finished\" | " << p << "   # read text from stdin\n"
-                 "  " << p << " voices [open|demo]      # list / open the voices folder, or hear each voice\n"
-                 "  " << p << " serve                    # OpenAI-compatible HTTP server on :8080\n"
-                 "\nRun \"" << p << " help\" for all options.\n";
-}
-
-static void print_usage(const char* p) {
-    std::cout << "Usage: " << p << " [-v VOICE] [-o FILE] TEXT...   speak TEXT (words are joined, quotes optional)\n"
-                 "       echo TEXT | " << p << " [-v VOICE]       read text from stdin\n"
-                 "       " << p << " voices [open|demo]             list / open the voices folder, demo: hear each voice\n"
-                 "       " << p << " serve [--port N]               OpenAI-compatible HTTP server\n"
-                 "       " << p << " help\n"
-                 "\nFast local text-to-speech with voice cloning.\n"
-                 "\nOptions:\n"
-                 "  -v, --voice NAME|FILE   voice from the voices folder, or any WAV/MP3/FLAC file\n"
-                 "                          (default: alba, or $OMATTS_VOICE); a bare language tag\n"
-                 "                          (-v de) uses that pack's default voice; \"tag/name\"\n"
-                 "                          like de/juergen selects the language pack models-<tag>\n"
-                 "  -o, --output FILE       write FILE instead of playing: .wav (default), .mp3 or\n"
-                 "                          .opus (those two need ffmpeg); \"-\" = WAV stream to stdout,\n"
-                 "                          \"-.mp3\"/\"-.opus\" = that format to stdout\n"
-                 "  -q, --quiet             no progress or status output\n"
-                 "  -h, --help              this help\n"
-                 "\nTuning:\n"
-                 "  --speed F               speaking speed 0.5-4.0, pitch unchanged (1.0)\n"
-                 "  --volume F              output gain 0.1-2, 1.0 unchanged (1.0)\n"
-                 "  --temperature F         sampling temperature (0.3)\n"
-                 "  --lsd-steps N           flow-matching Euler steps (2)\n"
-                 "  --seed N                fixed RNG seed for reproducible output (0 = random)\n"
-                 "  --precision int8|fp32   model weights (int8)\n"
-                 "  --threads N             CPU threads (0 = half of the cores)\n"
-                 "  --no-cache              do not cache voice embeddings on disk\n"
-                 "\nText:\n"
-                 "  [[pause N]]             N seconds of silence (default 0.5, max 10), e.g.\n"
-                 "                          omatts \"Hello. [[pause 1]] Goodbye.\"\n"
-                 "  [[volume F]]            volume for the following text (0.1-2, reset: [[volume]]),\n"
-                 "                          e.g. omatts \"Softly. [[volume 2]] And louder.\"\n"
-                 "  Special characters      wrap the whole message in quotes:\n"
-                 "                          omatts \"Wait - what?! Sure.\"\n"
-                 "\nPaths (default: ~/.local/share/omatts/models and /voices, as installed):\n"
-                 "  --models-dir DIR        or $OMATTS_MODELS_DIR\n"
-                 "  --voices-dir DIR        or $OMATTS_VOICES_DIR\n"
-                 "\nServer and background daemon:\n"
-                 "  The first call starts a daemon that keeps the model loaded, so later calls\n"
-                 "  are near-instant. It exits by itself when idle.\n"
-                 "  --port N                HTTP port for serve (8080)\n"
-                 "  --idle-exit SEC         daemon exits after SEC idle seconds (300, 0 = never)\n"
-                 "  --no-daemon             generate in-process, never use or start the daemon\n";
-}
 
 // Audio file extensions a voice can be stored as (same list as the runtime's
 // voice loader).
@@ -4162,6 +4129,79 @@ static std::string resolve_voice_tag(const omatts::Config& cfg, std::string& voi
     voice = tags[0] + "/" + voice;
     return tags[0];
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// CLI + HTTP Server Entry Point
+// ════════════════════════════════════════════════════════════════════════════
+
+#ifndef PTT_SHARED_LIB
+
+static void signal_handler(int sig) {
+    (void)sig;
+    omatts::g_server_running = false;
+    if (omatts::g_server_fd != PTT_INVALID_SOCKET) {
+        ptt_close(omatts::g_server_fd);
+        omatts::g_server_fd = PTT_INVALID_SOCKET;
+    }
+    std::cout << "\nShutting down...\n";
+}
+
+static void print_brief_usage(const char* p) {
+    std::cout << "Usage: " << p << " [-v VOICE] [-o FILE] TEXT...\n"
+                 "\n"
+                 "  " << p << " Hello world              # speak (default voice: alba)\n"
+                 "  " << p << " -v dhh Hello world       # pick a voice  (list: " << p << " voices)\n"
+                 "  " << p << " -o out.wav Hello world   # write a WAV file instead of playing (-o - = stdout)\n"
+                 "  echo \"Task finished\" | " << p << "   # read text from stdin\n"
+                 "  " << p << " voices [open|demo]      # list / open the voices folder, or hear each voice\n"
+                 "  " << p << " serve                    # OpenAI-compatible HTTP server on :8080\n"
+                 "\nRun \"" << p << " help\" for all options.\n";
+}
+
+static void print_usage(const char* p) {
+    std::cout << "Usage: " << p << " [-v VOICE] [-o FILE] TEXT...   speak TEXT (words are joined, quotes optional)\n"
+                 "       echo TEXT | " << p << " [-v VOICE]       read text from stdin\n"
+                 "       " << p << " voices [open|demo]             list / open the voices folder, demo: hear each voice\n"
+                 "       " << p << " serve [--port N]               OpenAI-compatible HTTP server\n"
+                 "       " << p << " help\n"
+                 "\nFast local text-to-speech with voice cloning.\n"
+                 "\nOptions:\n"
+                 "  -v, --voice NAME|FILE   voice from the voices folder, or any WAV/MP3/FLAC file\n"
+                 "                          (default: alba, or $OMATTS_VOICE); a bare language tag\n"
+                 "                          (-v de) uses that pack's default voice; \"tag/name\"\n"
+                 "                          like de/juergen selects the language pack models-<tag>\n"
+                 "  -o, --output FILE       write FILE instead of playing: .wav (default), .mp3 or\n"
+                 "                          .opus (those two need ffmpeg); \"-\" = WAV stream to stdout,\n"
+                 "                          \"-.mp3\"/\"-.opus\" = that format to stdout\n"
+                 "  -q, --quiet             no progress or status output\n"
+                 "  -h, --help              this help\n"
+                 "\nTuning:\n"
+                 "  --speed F               speaking speed 0.5-4.0, pitch unchanged (1.0)\n"
+                 "  --volume F              output gain 0.1-2, 1.0 unchanged (1.0)\n"
+                 "  --temperature F         sampling temperature (0.3)\n"
+                 "  --lsd-steps N           flow-matching Euler steps (2)\n"
+                 "  --seed N                fixed RNG seed for reproducible output (0 = random)\n"
+                 "  --precision int8|fp32   model weights (int8)\n"
+                 "  --threads N             CPU threads (0 = half of the cores)\n"
+                 "  --no-cache              do not cache voice embeddings on disk\n"
+                 "\nText:\n"
+                 "  [[pause N]]             N seconds of silence (default 0.5, max 10), e.g.\n"
+                 "                          omatts \"Hello. [[pause 1]] Goodbye.\"\n"
+                 "  [[volume F]]            volume for the following text (0.1-2, reset: [[volume]]),\n"
+                 "                          e.g. omatts \"Softly. [[volume 2]] And louder.\"\n"
+                 "  Special characters      wrap the whole message in quotes:\n"
+                 "                          omatts \"Wait - what?! Sure.\"\n"
+                 "\nPaths (default: ~/.local/share/omatts/models and /voices, as installed):\n"
+                 "  --models-dir DIR        or $OMATTS_MODELS_DIR\n"
+                 "  --voices-dir DIR        or $OMATTS_VOICES_DIR\n"
+                 "\nServer and background daemon:\n"
+                 "  The first call starts a daemon that keeps the model loaded, so later calls\n"
+                 "  are near-instant. It exits by itself when idle.\n"
+                 "  --port N                HTTP port for serve (8080)\n"
+                 "  --idle-exit SEC         daemon exits after SEC idle seconds (300, 0 = never)\n"
+                 "  --no-daemon             generate in-process, never use or start the daemon\n";
+}
+
 
 int main(int argc, char* argv[]) {
 #ifndef _WIN32
@@ -4572,7 +4612,7 @@ int main(int argc, char* argv[]) {
                         bool german = !tag.empty();
                         if (german) {  // "juergen" -> "Jürgen"
                             for (size_t k = 1; k < spoken.size(); k++)
-                                if (spoken[k] == 'u' && spoken[k + 1] == 'e') { spoken[k] = '\u00fc'; spoken.erase(k + 1, 1); break; }
+                                if (spoken[k] == 'u' && spoken[k + 1] == 'e') { spoken.replace(k, 2, "\u00fc"); break; }  // proper UTF-8 ü
                             if (!spoken.empty()) spoken[0] = std::toupper((unsigned char)spoken[0]);
                         } else if (!spoken.empty()) spoken[0] = std::toupper((unsigned char)spoken[0]);
                         std::string line;

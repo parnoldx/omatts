@@ -188,6 +188,27 @@ if(NOT ONNXRUNTIME_STATIC)
     endif()
 endif()
 
+# Unit tests: pure logic, no models needed. The test TU includes omatts.cpp
+# with PTT_SHARED_LIB to reach the statics and drop main().
+enable_testing()
+add_executable(omatts-test tests/test_omatts.cpp)
+target_compile_definitions(omatts-test PRIVATE PTT_SHARED_LIB)
+target_include_directories(omatts-test PRIVATE
+    ${ONNXRUNTIME_INCLUDE_DIR}
+    ${SENTENCEPIECE_INCLUDE_DIRS}
+    ${dr_libs_SOURCE_DIR}
+)
+target_link_libraries(omatts-test PRIVATE ${ONNXRUNTIME_LIB} sentencepiece-static)
+# EMBED builds have no DT_NEEDED on ORT in the main binary; the test links the
+# shared lib directly, so point its RPATH at the fetched copy.
+set_target_properties(omatts-test PROPERTIES BUILD_RPATH "${ONNXRUNTIME_ROOT}/lib")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(omatts-test PRIVATE pthread dl)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    target_link_libraries(omatts-test PRIVATE ws2_32)
+endif()
+add_test(NAME omatts-test COMMAND omatts-test)
+
 # Shared library (for FFI from Deno/Python)
 # Build with: cmake -B .build -DBUILD_SHARED_LIB=ON
 if(BUILD_SHARED_LIB)

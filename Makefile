@@ -7,7 +7,7 @@ DE_PACK   := $(DIST_DIR)/omatts-de-pack.tar.zst
 REPO ?= parnoldx/omatts
 TAG  ?= v$(shell date +%Y.%m.%d)
 
-.PHONY: build install shared deploy clean site-check site-serve
+.PHONY: build install shared deploy clean test site-check site-serve
 
 PREFIX ?= $(HOME)/.local
 
@@ -22,6 +22,11 @@ shared:
 
 install: build
 	install -Dm755 omatts $(DESTDIR)$(PREFIX)/bin/omatts
+
+# Unit tests (pure logic, no models needed)
+test: build
+	cmake --build $(BUILD_DIR) -j$$(nproc) --target omatts-test
+	ctest --test-dir $(BUILD_DIR) -R omatts-test --output-on-failure
 
 # One distributable: binary + ONNX models (default variant from export_onnx.py)
 # + voices. End users install it with the committed install.sh (curl | sh),
