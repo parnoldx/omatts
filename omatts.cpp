@@ -87,6 +87,7 @@
 #include <filesystem>
 #include <map>
 #include <set>
+#include <regex>
 #ifndef _WIN32
 #include <unistd.h>
 #endif
@@ -151,6 +152,7 @@ extern "C" const OrtApiBase* OrtGetApiBase(void) {
 
 namespace omatts {
 
+static void init_norm_rules(const std::string& models_dir);  // fwd: Config::load_models_dir loads per-pack text rules
 // ════════════════════════════════════════════════════════════════════════════
 // Types
 // ════════════════════════════════════════════════════════════════════════════
@@ -316,6 +318,7 @@ struct Config {
         // source of a robotic quantization artifact, and fp32 flow costs no measurable
         // speed (tiny model). Fall back to int8 flow if the fp32 file is absent.
         flow_fp32 = flow_fp32_pin > 0 || (flow_fp32_pin == 0 && std::filesystem::exists(models_dir + "/flow_lm_flow.onnx"));
+        init_norm_rules(models_dir);  // text rules follow the active language pack
     }
 
     // Switch to the pack for a voice tag ("de" → models-de sibling). Re-reads
@@ -409,11 +412,84 @@ static std::vector<float> resample(const std::vector<float>& in, int src, int ds
     return out;
 }
 
+// ── Text Normalization ──────────────────────────────────────────────────────
+// The model reads bare "$" and "%" poorly; expand the common cases before
+// generation so "$100" -> "100 dollars", "50%" -> "50 percent".
+//
+// Rules are data, per language pack: <models_dir>/normalize.txt ships with a
+// pack and REPLACES the built-in English defaults ("Prozent"/"Euro" for the
+// German pack, etc.). Format: one rule per line, `regex<TAB>replacement`
+// (std::regex ECMAScript syntax, all matches per rule, rules run in order),
+// '#' comments. Reloaded whenever the active language pack switches.
+struct NormRule { std::regex re; std::string repl; };
+static std::vector<NormRule> g_norm_rules;
+
+static bool load_norm_rules(std::istream& in, const char* source) {
+    std::vector<NormRule> rules;
+    std::string line;
+    int lineno = 0;
+    while (std::getline(in, line)) {
+        lineno++;
+        if (line.empty() || line[0] == '#') continue;
+        size_t tab = line.find('\t');
+        if (tab == std::string::npos) {
+            std::cerr << "normalize rules: skipping " << source << ":" << lineno
+                      << " (no tab between pattern and replacement)\n";
+            continue;
+        }
+        try {
+            rules.push_back({std::regex(line.substr(0, tab)), line.substr(tab + 1)});
+        } catch (const std::regex_error& e) {
+            std::cerr << "normalize rules: skipping " << source << ":" << lineno
+                      << " (bad regex: " << e.what() << ")\n";
+        }
+    }
+    if (rules.empty()) return false;
+    g_norm_rules = std::move(rules);
+    return true;
+}
+
+// Load the rules for a language pack. Missing/broken file -> English defaults;
+// generation never fails over text cosmetics.
+static void init_norm_rules(const std::string& models_dir) {
+    static const char* DEFAULTS =
+        "# Built-in English defaults (see also the normalize.txt docs in README.md)\n"
+        "\\$([0-9][0-9,]*(?:\\.[0-9]+)?)\t$1 dollars \n"
+        "€ ?([0-9][0-9,]*(?:\\.[0-9]+)?)\t$1 euros \n"
+        "£ ?([0-9][0-9,]*(?:\\.[0-9]+)?)\t$1 pounds \n"
+        "([0-9]) ?%\t$1 percent \n"
+        "([0-9]) ?° ?C\t$1 degrees Celsius \n"
+        "([0-9]) ?° ?F\t$1 degrees Fahrenheit \n"
+        "([0-9]) ?\\* ?([0-9])\t$1 times $2\n"
+        "([0-9]) ?- ?([0-9])\t$1 minus $2\n"
+        // division vs slash: between digits it's math (lookahead keeps the 2nd
+        // digit), otherwise a slash. "2023/24" says 'divided by' — known corner.
+        "([0-9]) ?/ ?(?=[0-9])\t$1 divided by \n"
+        "/\t slash \n"
+        "@\t at \n"
+        "([0-9])\\+([0-9])\t$1 plus $2\n"
+        "\\s*&\\s*\t and \n";
+    std::istringstream defaults(DEFAULTS);
+    if (load_norm_rules(defaults, "built-in defaults")) {
+        std::ifstream f(models_dir + "/normalize.txt");
+        if (f) load_norm_rules(f, (models_dir + "/normalize.txt").c_str());
+    }
+}
+
+static std::string normalize_symbols(const std::string& s) {
+    if (g_norm_rules.empty()) init_norm_rules("");  // direct callers before pack config
+    std::string out = s;
+    for (auto& r : g_norm_rules)
+        out = std::regex_replace(out, r.re, r.repl);
+    return out;
+}
+
 // ── Sentence Splitting ──────────────────────────────────────────────────────
 // Splits on sentence-ending punctuation (. ! ?) followed by whitespace or EOF.
 // Preserves punctuation with the sentence. Handles common abbreviations.
 
-static std::vector<std::string> split_sentences(const std::string& text) {
+static std::vector<std::string> split_sentences(const std::string& text_in) {
+    const std::string text = normalize_symbols(text_in);  // single choke point: every path funnels here
     std::vector<std::string> sentences;
     std::string current;
     
@@ -3995,6 +4071,48 @@ int main(int argc, char* argv[]) {
         }
         // Internal / expert flags, deliberately not in --help.
         else if (a == "--stdout") stdout_output = true;
+        else if (a == "--selftest-text") {  // internal: text normalization check
+            struct Case { const char* in; const char* must_contain; };
+            const Case cases[] = {
+                {"It costs $100.", "100 dollars"},
+                {"$3.50 for 50% off", "3.50 dollars"},
+                {"50% off", "50 percent"},
+                {"50 % off", "50 percent"},
+                {"Fish & Chips", "Fish and Chips"},
+                {"Hello [[pause 1]] $5 world", "[[pause 1]]"},  // pause tags untouched
+                {"100%", "100 percent"},
+                {"It's 20°C outside.", "20 degrees Celsius"},
+                {"That's €10 or £5.50.", "10 euros"},
+                {"£5.50", "5.50 pounds"},
+                {"Type 3+4 =", "3 plus 4"},
+                {"5 - 3 = 2", "5 minus 3"},
+                {"3 * 4", "3 times 4"},
+                {"10 / 2", "10 divided by 2"},
+                {"and/or", "and slash or"},
+                {"mail bob@example.com", "bob at example.com"},
+            };
+            for (const auto& c : cases) {
+                std::string got = omatts::normalize_symbols(c.in);
+                if (got.find(c.must_contain) == std::string::npos) {
+                    std::cerr << "selftest-text FAIL: [" << c.in << "] -> [" << got
+                              << "], missing [" << c.must_contain << "]\n";
+                    return 2;
+                }
+            }
+            // Rules-file mode: a custom set REPLACES the defaults; bad lines are skipped.
+            {
+                std::istringstream custom("# test\nZZZ+\tmooh \nbad line without tab\n([0-9]) ?%\t$1 Prozent \n");
+                if (!omatts::load_norm_rules(custom, "selftest")) { std::cerr << "selftest-text FAIL: rules load\n"; return 2; }
+                std::string got = omatts::normalize_symbols("ZZZ% 50%");
+                if (got.find("mooh") == std::string::npos || got.find("50 Prozent") == std::string::npos) {
+                    std::cerr << "selftest-text FAIL: custom rules -> [" << got << "]\n";
+                    return 2;
+                }
+                omatts::g_norm_rules.clear();  // restore defaults for anything after
+            }
+            std::cerr << "selftest-text: ok\n";
+            return 0;
+        }
         else if (a == "--tokenizer") cfg.tokenizer_path = next();
         else if (a == "--flow-fp32") cfg.flow_fp32_pin = 1;
         else if (a == "--flow-int8") cfg.flow_fp32_pin = -1;
