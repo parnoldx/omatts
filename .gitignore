@@ -13,7 +13,9 @@ libonnxruntime.so*
 # ONNX models (too large for git — produced by export_onnx.py)
 models/
 models-german/
-models-de/
+models-de/*
+# German pack's shipped voices are committed (weights never are)
+!models-de/voices-de/
 
 # Voice samples and cache
 voices/

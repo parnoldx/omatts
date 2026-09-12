@@ -335,10 +335,13 @@ def export_language_meta(model: TTSModel, output_dir: Path, language: str = "eng
 
     model_config.txt   — key=value flags; when the file is absent the C++
                          keeps legacy defaults (pad short inputs, nothing else).
+                         language=<tag> ties the pack to voice tags (de →
+                         models-de sibling dir selects the pack).
     bos_before_voice.f32 — raw fp32 [1024] BOS frame prepended to the voice
                          conditioning by the C++ runtime (insert_bos_before_voice).
     """
     flags = {
+        "language": {"english": "en", "english_2026-04": "en", "german": "de"}.get(language, "en"),
         "pad_short_inputs": int(model.config.pad_with_spaces_for_short_inputs),
         "remove_semicolons": int(model.config.remove_semicolons),
         "insert_bos_before_voice": int(model.flow_lm.insert_bos_before_voice),
@@ -1299,7 +1302,10 @@ def validate_flow_lm_main(model: TTSModel, onnx_dir: Path,
 
 
 def validate_mimi_decoder(model: TTSModel, onnx_dir: Path,
-                           onnx_file="mimi_decoder.onnx", atol=1e-4, rtol=1e-4):
+                           onnx_file="mimi_decoder.onnx", atol=1e-4, rtol=1e-4,
+                           gain: float = 1.0):
+    """gain: constant folded into the graph by add_output_gain (German pack) —
+    the PyTorch reference is scaled to match before comparing."""
     import onnxruntime as ort
     sess = ort.InferenceSession(str(onnx_dir / onnx_file))
     _monkeypatch_for_onnx()
@@ -1335,7 +1341,7 @@ def validate_mimi_decoder(model: TTSModel, onnx_dir: Path,
         feed[f"state_{i}"] = s.numpy()
     ort_out = sess.run(None, feed)
 
-    ok, msg = _compare("frame_0", pt_audio.numpy(), ort_out[0], atol=atol, rtol=rtol)
+    ok, msg = _compare("frame_0", pt_audio.numpy() * gain, ort_out[0], atol=atol, rtol=rtol)
     results.append((ok, f"mimi_decoder: {msg}"))
 
     # Multi-frame streaming (4 frames)
@@ -1354,13 +1360,14 @@ def validate_mimi_decoder(model: TTSModel, onnx_dir: Path,
             feed[f"state_{i}"] = s
         ort_frame_out = sess.run(None, feed)
         ort_stream_states = ort_frame_out[1:]
-        ok, msg = _compare(f"frame_{frame_idx+1}", pt_frame.numpy(), ort_frame_out[0], atol=atol, rtol=rtol)
+        ok, msg = _compare(f"frame_{frame_idx+1}", pt_frame.numpy() * gain, ort_frame_out[0], atol=atol, rtol=rtol)
         results.append((ok, f"mimi_decoder: {msg}"))
 
     return results
 
 
-def run_validation(model: TTSModel, onnx_dir: Path, int8: bool = False):
+def run_validation(model: TTSModel, onnx_dir: Path, int8: bool = False,
+                   decoder_gain: float = 1.0):
     """Run all validation checks. Returns True if all pass."""
     label = "INT8" if int8 else "FP32"
     atol = 0.5 if int8 else 1e-3
@@ -1382,7 +1389,8 @@ def run_validation(model: TTSModel, onnx_dir: Path, int8: bool = False):
     all_results.extend(validate_flow_lm_main(
         model, onnx_dir, onnx_file=f"flow_lm_main{suffix}", atol=atol, rtol=rtol))
     all_results.extend(validate_mimi_decoder(
-        model, onnx_dir, onnx_file=f"mimi_decoder{suffix}", atol=atol, rtol=rtol))
+        model, onnx_dir, onnx_file=f"mimi_decoder{suffix}", atol=atol, rtol=rtol,
+        gain=decoder_gain if int8 else 1.0))
 
     all_pass = True
     for ok, msg in all_results:
@@ -1539,7 +1547,8 @@ def main():
 
         int8_pass = True
         if (output_dir / "flow_lm_main_int8.onnx").exists():
-            int8_pass = run_validation(model, output_dir, int8=True)
+            int8_pass = run_validation(model, output_dir, int8=True,
+                                       decoder_gain=8.0 if args.language == "german" else 1.0)
 
         if not (fp32_pass and int8_pass):
             sys.exit(1)

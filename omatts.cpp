@@ -85,6 +85,8 @@
 #include <unordered_map>
 #include <vector>
 #include <filesystem>
+#include <map>
+#include <set>
 #ifndef _WIN32
 #include <unistd.h>
 #endif
@@ -236,6 +238,7 @@ struct Config {
     bool flow_fp32 = true;  // fp32 flow even when precision=int8: the int8 flow degrades
                             // stochastically on long text (robotic HF buzz, ~1/5 seeds vs 0/13
                             // with fp32 flow; ASR-verified). Costs ~3% speed (9.8x -> 9.6x).
+    int flow_fp32_pin = 0;  // -1 = --flow-int8, 0 = auto per pack, 1 = --flow-fp32
     int lsd_steps = 2, num_threads = 0, first_chunk_frames = 1, max_chunk_frames = 1;
     // lsd_steps=2: fp32 flow removed the constant robotic artifact, but stochastic
     // INT8 sampling glitches still slip through 1 Euler step occasionally (~7% speed
@@ -246,6 +249,7 @@ struct Config {
     bool voice_cache = true;
     // Per-model language/prompt-prep flags (from <models_dir>/model_config.txt,
     // written by export_onnx.py). Absent file → legacy English defaults.
+    std::string language = "en";  // pack tag: en/de/... — a voice tag picks models-<tag>
     bool pad_short_inputs = true;
     bool remove_semicolons = false;
     bool insert_bos_before_voice = false;
@@ -266,9 +270,26 @@ struct Config {
     void resolve_defaults() {
         if (models_dir.empty()) models_dir = find_data_dir("OMATTS_MODELS_DIR", "models");
         if (voices_dir.empty()) voices_dir = find_data_dir("OMATTS_VOICES_DIR", "voices");
-        if (tokenizer_path.empty()) tokenizer_path = models_dir + "/tokenizer.model";
-        // Per-model flags: prompt-prep behavior differs per language model
-        // (e.g. German: bos before voice + semicolon removal, no short-input padding).
+        load_models_dir();
+    }
+
+    // Directory of the pack for a voice tag: the current pack when the tag
+    // matches its language, else the models-<tag> sibling (models-de next to
+    // models). Throws when that pack isn't installed.
+    std::string find_models_dir(const std::string& tag) const {
+        if (tag.empty() || tag == language) return models_dir;
+        std::string alt = (std::filesystem::path(models_dir).parent_path() / ("models-" + tag)).string();
+        if (!std::filesystem::exists(alt))
+            throw std::runtime_error("language pack '" + tag + "' not installed (expected " + alt + ")");
+        return alt;
+    }
+
+    // (Re)load everything derived from models_dir — run again when a voice tag
+    // switches the language pack. An explicit --tokenizer survives the switch;
+    // a stale default from the previous pack follows the new one.
+    void load_models_dir() {
+        if (tokenizer_path.empty() || tokenizer_path == models_dir + "/tokenizer.model")
+            tokenizer_path = models_dir + "/tokenizer.model";
         {
             std::ifstream mf(models_dir + "/model_config.txt");
             std::string line;
@@ -276,7 +297,8 @@ struct Config {
                 size_t eq = line.find('=');
                 if (eq == std::string::npos) continue;
                 std::string k = line.substr(0, eq), v = line.substr(eq + 1);
-                if (k == "pad_short_inputs") pad_short_inputs = (v == "1" || v == "true");
+                if (k == "language") language = v;
+                else if (k == "pad_short_inputs") pad_short_inputs = (v == "1" || v == "true");
                 else if (k == "remove_semicolons") remove_semicolons = (v == "1" || v == "true");
                 else if (k == "insert_bos_before_voice") insert_bos_before_voice = (v == "1" || v == "true");
             }
@@ -293,8 +315,17 @@ struct Config {
         // FP32 flow model by default when precision=int8: the int8 flow model is the
         // source of a robotic quantization artifact, and fp32 flow costs no measurable
         // speed (tiny model). Fall back to int8 flow if the fp32 file is absent.
-        if (!flow_fp32)
-            flow_fp32 = std::filesystem::exists(models_dir + "/flow_lm_flow.onnx");
+        flow_fp32 = flow_fp32_pin > 0 || (flow_fp32_pin == 0 && std::filesystem::exists(models_dir + "/flow_lm_flow.onnx"));
+    }
+
+    // Switch to the pack for a voice tag ("de" → models-de sibling). Re-reads
+    // the pack's config; throws a clear error if the pack isn't installed.
+    void use_language_pack(const std::string& tag) {
+        std::string alt = find_models_dir(tag);
+        if (alt == models_dir) return;
+        if (tokenizer_path == models_dir + "/tokenizer.model") tokenizer_path.clear();
+        models_dir = alt;
+        load_models_dir();
     }
 };
 
@@ -2238,11 +2269,25 @@ public:
         return LatentGen(*this, snap, t, max, eos_extra);
     }
     
-    // Resolve a bare voice name to a builtin KV snapshot in the models dir.
-    // Returns empty string if the name isn't a builtin voice.
+    // Resolve a voice name to a builtin KV snapshot in the models dir.
+    // Returns empty string if the name isn't a builtin voice. A "tag/name"
+    // voice looks in that tag's pack (models-<tag> sibling); bare names use
+    // the current pack.
     std::string builtin_voice_kv(const std::string& name) const {
-        if (name.empty() || name.find('/') != std::string::npos) return "";
-        std::string kv = cfg_.models_dir + "/embeddings/" + name + ".kv";
+        if (name.empty()) return "";
+        std::string tag = cfg_.language, bare = name;
+        size_t slash = name.find('/');
+        if (slash != std::string::npos) {
+            tag = name.substr(0, slash);
+            bare = name.substr(slash + 1);
+        }
+        std::string dir = cfg_.models_dir;
+        if (tag != cfg_.language) {
+            std::string alt = (std::filesystem::path(cfg_.models_dir).parent_path() / ("models-" + tag)).string();
+            if (!std::filesystem::exists(alt)) return "";
+            dir = alt;
+        }
+        std::string kv = dir + "/embeddings/" + bare + ".kv";
         return std::filesystem::exists(kv) ? kv : "";
     }
 };
@@ -3672,6 +3717,7 @@ static void print_brief_usage(const char* p) {
                  "\n"
                  "  " << p << " Hello world              # speak (default voice: alba)\n"
                  "  " << p << " -v dhh Hello world       # pick a voice  (list: " << p << " voices)\n"
+                 "  " << p << " -v de/juergen Hallo      # tag/ voice: uses the models-de language pack\n"
                  "  " << p << " -o out.wav Hello world   # write a WAV file instead of playing (-o - = stdout)\n"
                  "  echo \"Task finished\" | " << p << "   # read text from stdin\n"
                  "  " << p << " voices [open]            # list voices / open the voices folder\n"
@@ -3688,7 +3734,8 @@ static void print_usage(const char* p) {
                  "\nFast local text-to-speech with voice cloning.\n"
                  "\nOptions:\n"
                  "  -v, --voice NAME|FILE   voice from the voices folder, or any WAV/MP3/FLAC file\n"
-                 "                          (default: alba, or $OMATTS_VOICE)\n"
+                 "                          (default: alba, or $OMATTS_VOICE); \"tag/name\" like\n"
+                 "                          de/juergen selects the language pack models-<tag>\n"
                  "  -o, --output FILE       write FILE instead of playing: .wav (default), .mp3 or\n"
                  "                          .opus (those two need ffmpeg); \"-\" = WAV stream to stdout\n"
                  "  -q, --quiet             no progress or status output\n"
@@ -3715,6 +3762,50 @@ static void print_usage(const char* p) {
                  "  --port N                HTTP port for serve (8080)\n"
                  "  --idle-exit SEC         daemon exits after SEC idle seconds (300, 0 = never)\n"
                  "  --no-daemon             generate in-process, never use or start the daemon\n";
+}
+
+// Audio file extensions a voice can be stored as (same list as the runtime's
+// voice loader).
+static const char* const AUDIO_EXTS[] = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac"};
+static bool is_audio_ext(const std::string& ext) {
+    for (const char* e : AUDIO_EXTS) if (ext == e) return true;
+    return false;
+}
+
+// Voice tag → language pack. "de/juergen" is explicit; a bare "juergen" that
+// is neither a top-level voice nor a builtin of the current pack is searched
+// once in the language subfolders of the voices dir — exactly one match
+// expands to "de/juergen", several exit with the candidate list. Returns the
+// tag ("" = keep the current pack).
+static std::string resolve_voice_tag(const omatts::Config& cfg, std::string& voice) {
+    if (voice.empty() || voice[0] == '/') return "";  // absolute path, not tag/name
+    if (std::filesystem::exists(voice)) return "";
+    for (const char* ext : AUDIO_EXTS) if (std::filesystem::exists(voice + ext)) return "";
+    size_t slash = voice.find('/');
+    if (slash != std::string::npos) return voice.substr(0, slash);
+
+    std::string top = cfg.voices_dir + "/" + voice;
+    if (std::filesystem::exists(top)) return "";
+    for (const char* ext : AUDIO_EXTS) if (std::filesystem::exists(top + ext)) return "";
+    if (std::filesystem::exists(cfg.models_dir + "/embeddings/" + voice + ".kv")) return "";
+
+    std::vector<std::string> tags;
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(cfg.voices_dir, ec)) {
+        if (!entry.is_directory()) continue;
+        std::string tag = entry.path().filename().string();
+        if (tag[0] == '.') continue;  // .cache & friends
+        for (const char* ext : AUDIO_EXTS)
+            if (std::filesystem::exists(entry.path() / (voice + ext))) { tags.push_back(tag); break; }
+    }
+    if (tags.empty()) return "";  // nothing anywhere: the regular not-found error fires later
+    if (tags.size() > 1) {
+        std::cerr << "Voice '" << voice << "' exists in several languages, use the qualified form -v <tag>/" << voice << ":\n";
+        for (const auto& t : tags) std::cerr << "  " << cfg.voices_dir << "/" << t << "/" << voice << "\n";
+        std::exit(1);
+    }
+    voice = tags[0] + "/" + voice;
+    return tags[0];
 }
 
 int main(int argc, char* argv[]) {
@@ -3789,21 +3880,39 @@ int main(int argc, char* argv[]) {
                 return 0;
             }
             std::cout << "Voices in " << cfg.voices_dir << " (add any WAV/MP3/FLAC file there):\n";
+            // Group by language: top-level files and the pack's builtin KV
+            // voices belong to the current pack's tag, subfolders to theirs.
+            std::map<std::string, std::set<std::string>> groups;
             if (std::filesystem::exists(cfg.voices_dir)) {
                 for (const auto& entry : std::filesystem::directory_iterator(cfg.voices_dir)) {
-                    if (!entry.is_regular_file()) continue;
-                    std::string ext = entry.path().extension().string();
-                    if (ext == ".wav" || ext == ".mp3" || ext == ".flac" || ext == ".ogg" || ext == ".m4a" || ext == ".aac")
-                        std::cout << "  " << entry.path().stem().string() << "\n";
+                    if (entry.is_directory()) {
+                        std::string tag = entry.path().filename().string();
+                        if (tag[0] == '.') continue;
+                        for (const auto& v : std::filesystem::directory_iterator(entry))
+                            if (v.is_regular_file() && is_audio_ext(v.path().extension().string()))
+                                groups[tag].insert(v.path().stem().string());
+                    } else if (entry.is_regular_file() && is_audio_ext(entry.path().extension().string())) {
+                        groups[cfg.language].insert(entry.path().stem().string());
+                    }
                 }
+            }
+            std::string emb = cfg.models_dir + "/embeddings";
+            if (std::filesystem::exists(emb)) {
+                for (const auto& v : std::filesystem::directory_iterator(emb))
+                    if (v.is_regular_file() && v.path().extension().string() == ".kv")
+                        groups[cfg.language].insert(v.path().stem().string());
+            }
+            for (const auto& [tag, names] : groups) {
+                std::cout << "  " << tag << ": ";
+                for (const auto& n : names) std::cout << n << (n == *names.rbegin() ? "\n" : ", ");
             }
             return 0;
         }
         // Internal / expert flags, deliberately not in --help.
         else if (a == "--stdout") stdout_output = true;
         else if (a == "--tokenizer") cfg.tokenizer_path = next();
-        else if (a == "--flow-fp32") cfg.flow_fp32 = true;
-        else if (a == "--flow-int8") cfg.flow_fp32 = false;
+        else if (a == "--flow-fp32") cfg.flow_fp32_pin = 1;
+        else if (a == "--flow-int8") cfg.flow_fp32_pin = -1;
         else if (a == "--eos-threshold") cfg.eos_threshold = std::stof(next());
         else if (a == "--eos-extra") cfg.eos_extra_frames = std::stoi(next());
         else if (a == "--first-chunk") cfg.first_chunk_frames = std::stoi(next());
@@ -3827,6 +3936,18 @@ int main(int argc, char* argv[]) {
     speed = std::max(0.5f, std::min(4.0f, speed));
 
     cfg.resolve_defaults();
+
+    // A voice tag picks the language pack: -v de/juergen switches to the
+    // models-de sibling (clear error when it isn't installed). The daemon
+    // socket below is derived from the effective models dir, so each pack's
+    // daemon coexists.
+    if (!server_mode) {
+        std::string tag = resolve_voice_tag(cfg, voice);
+        if (!tag.empty()) {
+            try { cfg.use_language_pack(tag); }
+            catch (const std::exception& e) { std::cerr << "omatts: " << e.what() << "\n"; return 1; }
+        }
+    }
 
     if (!server_mode && !daemon_mode && !selftest_leak
             && !std::filesystem::exists(cfg.models_dir + "/text_conditioner.onnx")) {
