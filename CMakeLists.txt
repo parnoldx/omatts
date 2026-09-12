@@ -16,7 +16,7 @@ project(omatts VERSION 1.0.0 LANGUAGES CXX C)
 
 # URL of the install script, shown when models are missing.
 # Override: cmake -B .build -DOMATTS_INSTALL_URL=https://raw.githubusercontent.com/<user>/omatts/master/install.sh
-set(OMATTS_INSTALL_URL "https://raw.githubusercontent.com/OWNER/omatts/master/install.sh" CACHE STRING "Install script URL for the missing-models error")
+set(OMATTS_INSTALL_URL "https://raw.githubusercontent.com/parnoldx/omatts/master/install.sh" CACHE STRING "Install script URL for the missing-models error")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
