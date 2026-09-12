@@ -3923,6 +3923,23 @@ int main(int argc, char* argv[]) {
                     if (v.is_regular_file() && v.path().extension().string() == ".kv")
                         groups[cfg.language].insert(v.path().stem().string());
             }
+            // Other installed packs: their builtin voices live in
+            // models-<tag>/voices-<tag>/ and embeddings/.
+            std::error_code vsec;
+            for (const auto& entry : std::filesystem::directory_iterator(cfg.models_dir + "/..", vsec)) {
+                if (!entry.is_directory()) continue;
+                std::string name = entry.path().filename().string();
+                if (name.rfind("models-", 0) != 0) continue;
+                std::string tag = name.substr(7);
+                for (const auto& v : std::filesystem::directory_iterator(entry.path() / ("voices-" + tag), vsec))
+                    if (v.is_regular_file() && is_audio_ext(v.path().extension().string()))
+                        groups[tag].insert(v.path().stem().string());
+                std::string e = entry.path().string() + "/embeddings";
+                if (std::filesystem::exists(e))
+                    for (const auto& v : std::filesystem::directory_iterator(e))
+                        if (v.is_regular_file() && v.path().extension().string() == ".kv")
+                            groups[tag].insert(v.path().stem().string());
+            }
             for (const auto& [tag, names] : groups) {
                 std::cout << "  " << tag << ": ";
                 for (const auto& n : names) std::cout << n << (n == *names.rbegin() ? "\n" : ", ");
