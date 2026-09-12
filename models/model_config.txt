@@ -1,0 +1,3 @@
+pad_short_inputs=0
+remove_semicolons=0
+insert_bos_before_voice=1

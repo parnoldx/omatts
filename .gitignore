@@ -12,13 +12,12 @@ libonnxruntime.so*
 
 # ONNX models (too large for git — produced by export_onnx.py)
 models/*
-# but the text rules are versioned with the repo
+# but text rules and the generated pack config are versioned with the repo
+!models/model_config.txt
 !models/normalize.txt
-models-german/
 models-de/*
+!models-de/model_config.txt
 !models-de/normalize.txt
-# German pack's shipped voices are committed (weights never are)
-!models-de/voices-de/
 
 # Voice samples are committed (small Opus files, ~600 KB total); only the
 # embedding cache stays out.

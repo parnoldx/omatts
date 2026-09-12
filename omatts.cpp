@@ -283,7 +283,9 @@ struct Config {
         if (tag.empty() || tag == language) return models_dir;
         std::string alt = (std::filesystem::path(models_dir).parent_path() / ("models-" + tag)).string();
         if (!std::filesystem::exists(alt))
-            throw std::runtime_error("language pack '" + tag + "' not installed (expected " + alt + ")");
+            throw std::runtime_error(
+                "language pack '" + tag + "' not installed (expected " + alt + "); install with:\n"
+                "  curl -fsSL https://raw.githubusercontent.com/parnoldx/omatts/master/install.sh | OMATTS_PACKS=" + tag + " OMATTS_PACKS_ONLY=1 sh");
         return alt;
     }
 
@@ -1792,7 +1794,7 @@ public:
         
         auto& env = get_ort_env();
         // Per-model suffix: prefer _int8 when the pack ships it, fall back to
-        // fp32 otherwise (the German pack has no int8 mimi_decoder).
+        // fp32 otherwise.
         auto pick_sfx = [&](const char* base) {
             return std::filesystem::exists(cfg_.models_dir + "/" + base + "_int8.onnx") ? std::string("_int8") : std::string();
         };
@@ -1805,8 +1807,8 @@ public:
         txt_ = std::make_unique<OrtSession>(env, cfg_.models_dir + "/text_conditioner.onnx", opts_full, "text_conditioner");
         main_ = std::make_unique<OrtSession>(env, cfg_.models_dir + "/flow_lm_main" + main_sfx + ".onnx", opts_ar, "flow_lm_main" + main_sfx);
         flow_ = std::make_unique<OrtSession>(env, cfg_.models_dir + "/flow_lm_flow" + (cfg_.flow_fp32 ? "" : pick_sfx("flow_lm_flow")) + ".onnx", opts_ar, "flow_lm_flow" + (cfg_.flow_fp32 ? "" : pick_sfx("flow_lm_flow")));
-        // fp32 decoder preferred when the pack ships one (German): the German
-        // decoder's int8 quantization is broken — same pattern as flow_fp32.
+        // fp32 decoder preferred when a pack ships one; default packs ship
+        // int8 decoders only.
         std::string dec_sfx = std::filesystem::exists(cfg_.models_dir + "/mimi_decoder.onnx")
                                   ? std::string() : pick_sfx("mimi_decoder");
         dec_ = std::make_unique<OrtSession>(env, cfg_.models_dir + "/mimi_decoder" + dec_sfx + ".onnx", opts_dec, "mimi_decoder" + dec_sfx);
@@ -4512,7 +4514,7 @@ int main(int argc, char* argv[]) {
                             line = "Hi, I'm dhh. We will fix everything!";
                         } else {
                             size_t si = order[pick++ % order.size()];
-                            line = german ? "Hi, ich bin " + spoken + ", " + slogans_de[si]
+                            line = german ? "Hallo, ich bin " + spoken + ", " + slogans_de[si]
                                           : "Hi, I'm " + spoken + ", " + slogans_en[si];
                         }
                         speaker->stream(line, n, [&](const float* s, size_t cnt) {

@@ -1067,18 +1067,13 @@ def print_listing(output_dir: Path):
     print(f"  {'TOTAL':30} {total:8.2f} MB")
 
 
-def trim_to_default_variant(onnx_dir: Path, keep_fp32_decoder: bool = False):
+def trim_to_default_variant(onnx_dir: Path):
     """Remove the variants the runtime never loads, so the default export is
     exactly what ships: int8 flow_lm_main + int8 mimi_decoder + fp32
     flow_lm_flow (used instead of int8 flow — it causes robotic artifacts)
-    plus the always-fp32 mimi_encoder / text_conditioner.
-
-    keep_fp32_decoder: the German pack ships an fp32 decoder instead (its
-    int8 quantization is broken) — trim the int8 decoder, keep fp32."""
-    removed = 0
+    plus the always-fp32 mimi_encoder / text_conditioner."""
     names = ["flow_lm_main.onnx", "mimi_decoder.onnx", "flow_lm_flow_int8.onnx"]
-    if keep_fp32_decoder:
-        names = ["flow_lm_main.onnx", "mimi_decoder_int8.onnx", "flow_lm_flow_int8.onnx"]
+    removed = 0
     for name in names:
         for suffix in ("", ".data"):
             f = onnx_dir / (name + suffix)
@@ -1502,7 +1497,7 @@ def main():
         # resolve_builtin_kv). Re-add only if builtin KV voices are ever wanted.
 
         externalize_models(output_dir)
-        trim_to_default_variant(output_dir, keep_fp32_decoder=(args.language == "german"))
+        trim_to_default_variant(output_dir)
 
     # --- Validate ---
     if not args.no_validate:

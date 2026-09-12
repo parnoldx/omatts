@@ -1,6 +1,7 @@
 BUILD_DIR := .build
 DIST_DIR  ?= dist
 TARBALL   := $(DIST_DIR)/omatts-linux-x86_64.tar.zst
+DE_PACK   := $(DIST_DIR)/omatts-de-pack.tar.zst
 
 # Where make deploy publishes the tarball (GitHub Releases).
 REPO ?= parnoldx/omatts
@@ -25,14 +26,19 @@ install: build
 # One distributable: binary + ONNX models (default variant from export_onnx.py)
 # + voices. End users install it with the committed install.sh (curl | sh),
 # which unpacks binary -> ~/.local/bin, models/voices -> ~/.local/share/omatts.
+# Two release assets:
+#   main tarball  = binary + EN pack (models/ + English voices)
+#   de pack       = models-de/ + voices/de/, installed by install.sh via
+#                   OMATTS_PACKS=de (pack tarballs are named omatts-<tag>-pack.tar.zst)
 deploy: build
 	.venv/bin/python export_onnx.py
 	@mkdir -p $(DIST_DIR)
-	tar --zstd --exclude='voices/.cache' --exclude='models/.cache' \
+	tar --zstd --exclude='voices/.cache' --exclude='models/.cache' --exclude='voices/de' \
 		-cf $(TARBALL) omatts models voices README.md
-	ls -lh $(TARBALL)
-	gh release create $(TAG) --repo $(REPO) --generate-notes $(TARBALL) \
-		|| gh release upload $(TAG) --repo $(REPO) $(TARBALL) --clobber
+	tar --zstd --exclude='models-de/.cache' --exclude='voices/.cache' -cf $(DE_PACK) models-de voices/de
+	ls -lh $(TARBALL) $(DE_PACK)
+	gh release create $(TAG) --repo $(REPO) --generate-notes $(TARBALL) $(DE_PACK) \
+		|| gh release upload $(TAG) --repo $(REPO) $(TARBALL) $(DE_PACK) --clobber
 
 clean:
 	rm -rf $(BUILD_DIR) $(DIST_DIR)

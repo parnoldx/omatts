@@ -21,6 +21,15 @@ Binary to `~/.local/bin`, models and voices to `~/.local/share/omatts`.
 Requires `curl` and `zstd`. Override with `PREFIX`, `OMATTS_VERSION`, or
 `OMATTS_URL` — see the script header.
 
+The installer asks whether to also install the German pack (~120 MB); say
+yes, or set it up front / add it later:
+
+```bash
+curl -fsSL .../install.sh | OMATTS_PACKS=de sh                       # fresh install incl. German
+curl -fsSL .../install.sh | OMATTS_PACKS=de OMATTS_PACKS_ONLY=1 sh   # add German later
+omatts -v de/klaus Hallo Welt
+```
+
 ## Usage
 
 ```bash
@@ -117,11 +126,10 @@ them; `--no-cache` disables them entirely.
 ### Build from source
 
 ```bash
-make dist    # exports models, builds, packs dist/omatts-linux-x86_64.tar.zst
-make deploy  # ...and publishes it as a GitHub release
+make deploy  # exports models, builds, packs dist/, publishes the release
 ```
 
-`make dist` runs `export_onnx.py`, which exports, quantizes, and validates all
+`make deploy` runs `export_onnx.py`, which exports, quantizes, and validates all
 ONNX models from the upstream weights (requires
 [uv](https://docs.astral.sh/uv/); it pins a pocket-tts commit because newer
 releases dropped the `conditioners` module the script imports). Weights land in
