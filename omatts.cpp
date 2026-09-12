@@ -4056,8 +4056,9 @@ static void print_usage(const char* p) {
                  "\nFast local text-to-speech with voice cloning.\n"
                  "\nOptions:\n"
                  "  -v, --voice NAME|FILE   voice from the voices folder, or any WAV/MP3/FLAC file\n"
-                 "                          (default: alba, or $OMATTS_VOICE); \"tag/name\" like\n"
-                 "                          de/juergen selects the language pack models-<tag>\n"
+                 "                          (default: alba, or $OMATTS_VOICE); a bare language tag\n"
+                 "                          (-v de) uses that pack's default voice; \"tag/name\"\n"
+                 "                          like de/juergen selects the language pack models-<tag>\n"
                  "  -o, --output FILE       write FILE instead of playing: .wav (default), .mp3 or\n"
                  "                          .opus (those two need ffmpeg); \"-\" = WAV stream to stdout,\n"
                  "                          \"-.mp3\"/\"-.opus\" = that format to stdout\n"
@@ -4109,6 +4110,34 @@ static std::string resolve_voice_tag(const omatts::Config& cfg, std::string& voi
     for (const char* ext : AUDIO_EXTS) if (std::filesystem::exists(voice + ext)) return "";
     size_t slash = voice.find('/');
     if (slash != std::string::npos) return voice.substr(0, slash);
+
+    // Bare tag: "-v de" = the default voice of that language pack: the first
+    // voice (alphabetically) in voices/<tag>/ — finn for de, alba for en.
+    // ponytail: if a pack ever needs a non-alphabetical default, add a
+    // models-<tag>/default_voice.txt and read it here.
+    std::string vdir = cfg.voices_dir + "/" + voice;
+    bool is_tag = std::filesystem::is_directory(vdir)
+        || std::filesystem::exists(std::filesystem::path(cfg.models_dir).parent_path() / ("models-" + voice));
+    if (is_tag) {
+        std::error_code dec;
+        std::string best;  // lexicographically first voice file — directory order is arbitrary
+        for (const auto& entry : std::filesystem::directory_iterator(vdir, dec)) {
+            std::string f = entry.path().filename().string();
+            if (f.empty() || f[0] == '.') continue;
+            for (const char* ext : AUDIO_EXTS) {
+                size_t elen = strlen(ext);
+                if (f.size() > elen && f.compare(f.size() - elen, elen, ext) == 0
+                        && (best.empty() || f < best)) { best = f; break; }
+            }
+        }
+        if (!best.empty()) {
+            for (const char* ext : AUDIO_EXTS)
+                if (best.size() > strlen(ext) && best.compare(best.size() - strlen(ext), strlen(ext), ext) == 0)
+                    { voice = voice + "/" + best.substr(0, best.size() - strlen(ext)); break; }
+            return voice.substr(0, voice.find('/'));
+        }
+        // tag known but no voices shipped: fall through, normal error fires
+    }
 
     std::string top = cfg.voices_dir + "/" + voice;
     if (std::filesystem::exists(top)) return "";

@@ -35,6 +35,7 @@ omatts -v de/klaus Hallo Welt
 ```bash
 omatts Hello world                        # speaks out loud
 omatts -v dhh Hello world                 # pick a voice from voices/
+omatts -v de Hallo Welt                   # a language tag = that pack's default voice (finn)
 omatts -v ~/clips/me.mp3 Hello world      # ...or clone from any audio file
 omatts -o out.wav Hello world             # write a WAV instead of playing
 omatts -o - Hello world | ffplay -nodisp -autoexit -
