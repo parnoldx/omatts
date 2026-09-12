@@ -209,6 +209,18 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
 endif()
 add_test(NAME omatts-test COMMAND omatts-test)
 
+# End-to-end tests: real models + the CLI/HTTP binary. Auto-skips (exit 77) when
+# the ONNX models are absent, so this stays green on a bare checkout.
+find_program(PYTHON3_EXECUTABLE python3)
+if(PYTHON3_EXECUTABLE)
+    add_test(NAME omatts-e2e
+        COMMAND ${PYTHON3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/integration.py
+                --binary $<TARGET_FILE:omatts>
+                --models ${CMAKE_SOURCE_DIR}/models
+                --voices ${CMAKE_SOURCE_DIR}/voices)
+    set_tests_properties(omatts-e2e PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
 # Shared library (for FFI from Deno/Python)
 # Build with: cmake -B .build -DBUILD_SHARED_LIB=ON
 if(BUILD_SHARED_LIB)

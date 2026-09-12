@@ -451,6 +451,56 @@ static void test_resolve_voice_tag() {
     fs::remove_all(tmp);
 }
 
+// ── HTTP request parsing (server crash regression) ─────────────────────────
+
+#ifndef _WIN32
+static omatts::HttpRequest http_parse_raw(const std::string& raw) {
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) { CHECK(false); return {}; }
+    size_t off = 0;
+    while (off < raw.size()) {
+        ssize_t n = ::send(sv[1], raw.data() + off, raw.size() - off, 0);
+        if (n <= 0) break;
+        off += (size_t)n;
+    }
+    ::shutdown(sv[1], SHUT_WR);
+    auto req = omatts::HttpRequest::parse(sv[0]);
+    ::close(sv[0]);
+    ::close(sv[1]);
+    return req;
+}
+
+static void test_http_parse() {
+    auto r = http_parse_raw("POST /tts HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello");
+    CHECK_EQ(r.method, "POST");
+    CHECK_EQ(r.path, "/tts");
+    CHECK_EQ(r.body, "hello");
+
+    auto ci = http_parse_raw("GET /health HTTP/1.1\r\ncontent-length: 0\r\n\r\n");
+    CHECK_EQ(ci.method, "GET");
+    CHECK_EQ(ci.path, "/health");
+
+    // Garbage Content-Length used to throw out of parse() and kill the server.
+    auto bad = http_parse_raw("POST /tts HTTP/1.1\r\nContent-Length: abc\r\n\r\nbody");
+    CHECK_EQ(bad.method, "POST");
+    CHECK_EQ(bad.path, "/tts");
+    CHECK_EQ(bad.body, "body");
+
+    // A hostile length is dropped, not trusted into a huge loop/allocation.
+    auto huge = http_parse_raw("POST /tts HTTP/1.1\r\nContent-Length: 99999999999\r\n\r\nbody");
+    CHECK_EQ(huge.body, "body");
+
+    // No Content-Length: body is whatever arrived with the headers.
+    auto none = http_parse_raw("POST /tts HTTP/1.1\r\n\r\nxyz");
+    CHECK_EQ(none.body, "xyz");
+
+    // Malformed request line: fields stay empty, no crash.
+    auto junk = http_parse_raw("garbage\r\n\r\n");
+    CHECK_EQ(junk.method, "");
+    CHECK_EQ(junk.path, "");
+}
+#endif
+
 int main() {
     test_split_pauses();
     test_sentences_with_pauses();
@@ -468,6 +518,9 @@ int main() {
     test_chunk_budget();
     test_init_norm_rules();
     test_resolve_voice_tag();
+#ifndef _WIN32
+    test_http_parse();
+#endif
 
     if (g_failed) {
         std::cerr << g_failed << "/" << g_total << " checks FAILED\n";

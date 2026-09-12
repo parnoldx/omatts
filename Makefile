@@ -7,7 +7,7 @@ DE_PACK   := $(DIST_DIR)/omatts-de-pack.tar.zst
 REPO ?= parnoldx/omatts
 TAG  ?= v$(shell date +%Y.%m.%d)
 
-.PHONY: build install shared deploy clean test site-check site-serve
+.PHONY: build install shared deploy clean test test-e2e site-check site-serve
 
 PREFIX ?= $(HOME)/.local
 
@@ -27,6 +27,11 @@ install: build
 test: build
 	cmake --build $(BUILD_DIR) -j$$(nproc) --target omatts-test
 	ctest --test-dir $(BUILD_DIR) -R omatts-test --output-on-failure
+
+# End-to-end tests: drive the built binary with real models and a real voice
+# through the CLI and HTTP server. Auto-skips if models/ is absent.
+test-e2e: build
+	ctest --test-dir $(BUILD_DIR) -R omatts-e2e --output-on-failure
 
 # One distributable: binary + ONNX models (default variant from export_onnx.py)
 # + voices. End users install it with the committed install.sh (curl | sh),

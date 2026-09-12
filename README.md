@@ -139,6 +139,13 @@ Unit tests (pure logic — text chunking, tags, JSON, caches; no models needed):
 make test
 ```
 
+End-to-end tests (drive the built binary with the real models through the CLI
+and HTTP server; skips automatically when `models/` is absent):
+
+```bash
+make test-e2e
+```
+
 `make deploy` runs `export_onnx.py`, which exports, quantizes, and validates all
 ONNX models from the upstream weights (requires
 [uv](https://docs.astral.sh/uv/); it pins a pocket-tts commit because newer
