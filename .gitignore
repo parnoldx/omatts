@@ -20,8 +20,8 @@ models-de/*
 # German pack's shipped voices are committed (weights never are)
 !models-de/voices-de/
 
-# Voice samples and cache
-voices/
+# Voice samples are committed (small Opus files, ~600 KB total); only the
+# embedding cache stays out.
 voices/.cache/
 
 # Python
