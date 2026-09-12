@@ -2395,6 +2395,38 @@ constexpr int64_t Omatts::LatentGen::empty_seq_shape_[3];
 constexpr int64_t Omatts::LatentGen::s_shape_[2];
 constexpr int64_t Omatts::LatentGen::x_shape_[2];
 
+// ── Streaming silence gate ─────────────────────────────────────────────────
+// The model emits a long (~2-3s) sentence-final pause per generated chunk;
+// when sentences are joined these stack into dead air. The gate passes audio
+// through untouched while speech is loud, and once a quiet run exceeds the
+// cap it drops samples until sound resumes — squashing the pause to the cap
+// with zero added latency. Applies to decoder output only, so explicit
+// [[pause N]] tag silence (written separately) bypasses it.
+struct SilenceGate {
+    static constexpr float LOUD = 0.02f;  // ~ -34 dBFS: speech vs decode noise floor
+    static constexpr int RATE = 24000;    // Omatts::SR (member constant, mirror here)
+    StreamCallback cb_;
+    size_t quiet_run_ = 0;       // samples in the current quiet run
+    bool heard_speech_ = false;  // head cap applies until the first loud sample
+    explicit SilenceGate(StreamCallback cb) : cb_(std::move(cb)) {}
+    size_t cap() const { return heard_speech_ ? size_t(0.4 * RATE) : size_t(0.2 * RATE); }
+    bool operator()(const float* s, size_t n) {
+        std::vector<float> out;
+        out.reserve(n);
+        for (size_t i = 0; i < n; ++i) {
+            if (std::abs(s[i]) >= LOUD) {
+                quiet_run_ = 0;
+                heard_speech_ = true;
+            } else if (++quiet_run_ > cap()) {
+                continue;  // squashed: over-cap quiet sample dropped
+            }
+            out.push_back(s[i]);
+        }
+        if (out.empty()) return true;
+        return cb_(out.data(), out.size());
+    }
+};
+
 // ── Out-of-line method definitions ──────────────────────────────────────────
 
 AudioData Omatts::generate(const std::string& text, const Tensor& voice, int max_frames,
@@ -2452,6 +2484,7 @@ AudioData Omatts::generate(const std::string& text, const Tensor& voice, int max
 
 void Omatts::stream(const std::string& text, const Tensor& voice, StreamCallback cb, int max_frames,
                        const std::string& builtin_kv) {
+    SilenceGate gate(cb);  // decoder audio routes through the gate; [[pause]] silence bypasses it
     auto sentences = sentences_with_pauses(text);
     
     for (size_t si = 0; si < sentences.size(); ++si) {
@@ -2558,7 +2591,7 @@ void Omatts::stream(const std::string& text, const Tensor& voice, StreamCallback
                     std::cerr << "   [sent " << si << "] batch=" << batch.size() << " lat_hash=" << std::hex << h1 << " aud_hash=" << h2 << std::dec << " n=" << n << "\n";
                 }
                 
-                if (!cb(outputs[0].GetTensorData<float>(), n)) {
+                if (!gate(outputs[0].GetTensorData<float>(), n)) {
                     std::lock_guard<std::mutex> lock(mtx);
                     aborted = true;
                     break;
