@@ -1769,7 +1769,10 @@ public:
         txt_ = std::make_unique<OrtSession>(env, cfg_.models_dir + "/text_conditioner.onnx", opts_full, "text_conditioner");
         main_ = std::make_unique<OrtSession>(env, cfg_.models_dir + "/flow_lm_main" + sfx + ".onnx", opts_ar, "flow_lm_main" + sfx);
         flow_ = std::make_unique<OrtSession>(env, cfg_.models_dir + "/flow_lm_flow" + (cfg_.flow_fp32 ? "" : sfx) + ".onnx", opts_ar, "flow_lm_flow" + (cfg_.flow_fp32 ? "" : sfx));
-        dec_ = std::make_unique<OrtSession>(env, cfg_.models_dir + "/mimi_decoder" + sfx + ".onnx", opts_dec, "mimi_decoder" + sfx);
+        // fp32 decoder preferred when the pack ships one (German): the German
+        // decoder's int8 quantization is broken — same pattern as flow_fp32.
+        bool dec_fp32 = std::filesystem::exists(cfg_.models_dir + "/mimi_decoder.onnx");
+        dec_ = std::make_unique<OrtSession>(env, cfg_.models_dir + "/mimi_decoder" + (dec_fp32 ? "" : sfx) + ".onnx", opts_dec, "mimi_decoder" + (dec_fp32 ? "" : sfx));
         
         main_runner_ = std::make_unique<StatefulRunner>(*main_);
         dec_runner_ = std::make_unique<StatefulRunner>(*dec_);
