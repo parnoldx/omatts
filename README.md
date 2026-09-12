@@ -41,6 +41,7 @@ omatts -o out.wav Hello world             # write a WAV instead of playing
 omatts -o - Hello world | ffplay -nodisp -autoexit -
 echo "Task finished" | omatts             # read from stdin
 omatts "Hello [[pause 1]] world"          # 1s of silence via [[pause N]] tag
+omatts "Softly. [[volume 2]] Louder."     # inline volume, reset with [[volume]]
 omatts serve --port 8080                  # OpenAI-compatible HTTP server
 ```
 
@@ -97,9 +98,11 @@ curl -X POST http://localhost:8080/v1/audio/speech \
 
 | Flag | Default | What it does |
 |---|---|---|
-| `-v`, `--voice <name\|file>` | `alba` / `$OMATTS_VOICE` | Voice name or audio file |
-| `-o`, `--output <file>` | play | Write WAV; `-` streams to stdout |
+| `-v`, `--voice <name\|file>` | `alba` / `$OMATTS_VOICE` | Voice name or audio file; a bare language tag (`-v de`) uses that pack's default voice; `tag/name` like `de/juergen` selects the language pack |
+| `-o`, `--output <file>` | play | Write WAV, MP3 or OPUS (those two need ffmpeg); `-` streams WAV to stdout, `-.mp3`/`-.opus` that format |
 | `-q`, `--quiet` | — | No status output |
+| `--speed <f>` | `1.0` | Speaking speed 0.5–4.0, pitch unchanged |
+| `--volume <f>` | `1.0` | Output gain 0.1–2 |
 | `--precision <int8\|fp32>` | `int8` | The flow model always uses fp32 when available |
 | `--temperature <f>` | `0.3` | Sampling temperature |
 | `--lsd-steps <n>` | `2` | Flow matching ODE solver steps |
