@@ -426,6 +426,51 @@ static std::vector<std::string> split_sentences(const std::string& text) {
     return sentences;
 }
 
+// ── In-text pause tags: [[pause N]] / [[pause]] ─────────────────────────────
+// [[pause N]] inserts N seconds of silence (clamped to [0, 10]); [[pause]]
+// defaults to 0.5s. Text is split into segments at the tags; each segment is
+// sentence-split and carries the pause that follows its last sentence. Tags
+// never reach the tokenizer.
+
+static std::vector<std::pair<std::string, float>> split_pauses(const std::string& text) {
+    std::vector<std::pair<std::string, float>> parts;
+    size_t pos = 0;
+    while (true) {
+        size_t open = text.find("[[pause", pos);
+        if (open == std::string::npos) {
+            parts.push_back({text.substr(pos), 0.0f});
+            break;
+        }
+        parts.push_back({text.substr(pos, open - pos), 0.0f});
+        size_t close = text.find("]" "]", open);
+        if (close == std::string::npos) {  // unterminated tag: keep as literal text
+            parts.back().first += text.substr(open);
+            break;
+        }
+        float sec = 0.5f;  // [[pause]] with no number
+        try {
+            sec = std::clamp(std::stof(text.substr(open + 7, close - open - 7)), 0.0f, 10.0f);
+        } catch (...) {}
+        parts.back().second = sec;
+        pos = close + 2;
+    }
+    return parts;
+}
+
+static std::vector<std::pair<std::string, float>> sentences_with_pauses(const std::string& text) {
+    std::vector<std::pair<std::string, float>> result;
+    for (auto& [seg, pause] : split_pauses(text)) {
+        auto sentences = split_sentences(seg);
+        if (sentences.empty()) {
+            if (pause > 0) result.push_back({"", pause});
+            continue;
+        }
+        for (size_t i = 0; i < sentences.size(); ++i)
+            result.push_back({sentences[i], i + 1 == sentences.size() ? pause : 0.0f});
+    }
+    return result;
+}
+
 // ── Text preparation (matches Python's prepare_text_prompt) ────────────────
 
 static int count_words(const std::string& text) {
@@ -2266,13 +2311,20 @@ AudioData Omatts::generate(const std::string& text, const Tensor& voice, int max
 
 void Omatts::stream(const std::string& text, const Tensor& voice, StreamCallback cb, int max_frames,
                        const std::string& builtin_kv) {
-    auto sentences = split_sentences(text);
-    if (sentences.empty()) sentences.push_back(text);
+    auto sentences = sentences_with_pauses(text);
     
     for (size_t si = 0; si < sentences.size(); ++si) {
-        auto [prepared, eos_extra] = prepare_text(sentences[si], cfg_.eos_extra_frames,
+        auto [prepared, eos_extra] = prepare_text(sentences[si].first, cfg_.eos_extra_frames,
                                                    cfg_.pad_short_inputs, cfg_.remove_semicolons);
-        if (prepared.empty()) continue;
+        if (prepared.empty()) {
+            // No speakable text (empty segment / punctuation only), but a pause
+            // may still follow: leading "[[pause 1]]", trailing tag, "[[pause]]".
+            if (sentences[si].second > 0) {
+                std::vector<float> silence(size_t(std::lround(sentences[si].second * SR)));
+                if (!cb(silence.data(), silence.size())) return;
+            }
+            continue;
+        }
         auto tok = tokenize(prepared);
         auto gen = builtin_kv.empty()
                        ? make_gen(voice, tok, max_frames, eos_extra)
@@ -2378,6 +2430,12 @@ void Omatts::stream(const std::string& text, const Tensor& voice, StreamCallback
             gen_thread.join();
         }
         if (aborted) return;
+        
+        // Silence for a [[pause N]] tag following this sentence
+        if (sentences[si].second > 0) {
+            std::vector<float> silence(size_t(std::lround(sentences[si].second * SR)));
+            if (!cb(silence.data(), silence.size())) return;
+        }
     }
 }
 
@@ -3627,7 +3685,7 @@ static void print_usage(const char* p) {
                  "       " << p << " voices [open]                  list voices / open the voices folder\n"
                  "       " << p << " serve [--port N]               OpenAI-compatible HTTP server\n"
                  "       " << p << " help\n"
-                 "\nFast local text-to-speech with voice cloning (Kyutai Pocket TTS, CPU only).\n"
+                 "\nFast local text-to-speech with voice cloning.\n"
                  "\nOptions:\n"
                  "  -v, --voice NAME|FILE   voice from the voices folder, or any WAV/MP3/FLAC file\n"
                  "                          (default: alba, or $OMATTS_VOICE)\n"
@@ -3635,7 +3693,7 @@ static void print_usage(const char* p) {
                  "                          .opus (those two need ffmpeg); \"-\" = WAV stream to stdout\n"
                  "  -q, --quiet             no progress or status output\n"
                  "  -h, --help              this help\n"
-                 "\nTuning (defaults match upstream Pocket TTS):\n"
+                 "\nTuning:\n"
                  "  --speed F               speaking speed 0.5-4.0, pitch unchanged (1.0)\n"
                  "  --temperature F         sampling temperature (0.3)\n"
                  "  --lsd-steps N           flow-matching Euler steps (2)\n"
@@ -3643,6 +3701,11 @@ static void print_usage(const char* p) {
                  "  --precision int8|fp32   model weights (int8)\n"
                  "  --threads N             CPU threads (0 = half of the cores)\n"
                  "  --no-cache              do not cache voice embeddings on disk\n"
+                 "\nText:\n"
+                 "  [[pause N]]             N seconds of silence (default 0.5, max 10), e.g.\n"
+                 "                          omatts \"Hello. [[pause 1]] Goodbye.\"\n"
+                 "  Special characters      wrap the whole message in quotes:\n"
+                 "                          omatts \"Wait - what?! Sure.\"\n"
                  "\nPaths (default: ~/.local/share/omatts/models and /voices, as installed):\n"
                  "  --models-dir DIR        or $OMATTS_MODELS_DIR\n"
                  "  --voices-dir DIR        or $OMATTS_VOICES_DIR\n"
@@ -3651,8 +3714,7 @@ static void print_usage(const char* p) {
                  "  are near-instant. It exits by itself when idle.\n"
                  "  --port N                HTTP port for serve (8080)\n"
                  "  --idle-exit SEC         daemon exits after SEC idle seconds (300, 0 = never)\n"
-                 "  --no-daemon             generate in-process, never use or start the daemon\n"
-                 "\nText that starts with \"-\":  " << p << " -- -foo bar\n";
+                 "  --no-daemon             generate in-process, never use or start the daemon\n";
 }
 
 int main(int argc, char* argv[]) {

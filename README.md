@@ -30,11 +30,15 @@ omatts -v ~/clips/me.mp3 Hello world      # ...or clone from any audio file
 omatts -o out.wav Hello world             # write a WAV instead of playing
 omatts -o - Hello world | ffplay -nodisp -autoexit -
 echo "Task finished" | omatts             # read from stdin
+omatts "Hello [[pause 1]] world"          # 1s of silence via [[pause N]] tag
 omatts serve --port 8080                  # OpenAI-compatible HTTP server
 ```
 
 The first call warms up a background daemon that keeps the model loaded;
 later calls start in milliseconds. It exits after 5 idle minutes.
+
+In-text pauses: `[[pause N]]` inserts N seconds of silence (default `0.5` with
+no number, clamped to 0–10); works on stdin, `-o`, and the HTTP API.
 
 More:
 
