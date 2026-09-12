@@ -548,7 +548,16 @@ static std::vector<std::pair<std::string, float>> split_pauses(const std::string
     return parts;
 }
 
+static int count_words(const std::string& text);
+
 static std::vector<std::pair<std::string, float>> sentences_with_pauses(const std::string& text) {
+    // Merge consecutive sentences into one generation chunk up to a token budget,
+    // mirroring upstream split_into_best_sentences (MAX_TOKEN_PER_CHUNK = 50).
+    // Every chunk starts cold from the voice state and the first words of short
+    // cold starts garble easily — fewer chunks = fewer artifacts.
+    constexpr size_t kMaxTokensPerChunk = 50;
+    auto token_estimate = [](const std::string& s) { return count_words(s) + 2; };
+
     std::vector<std::pair<std::string, float>> result;
     for (auto& [seg, pause] : split_pauses(text)) {
         auto sentences = split_sentences(seg);
@@ -556,8 +565,17 @@ static std::vector<std::pair<std::string, float>> sentences_with_pauses(const st
             if (pause > 0) result.push_back({"", pause});
             continue;
         }
-        for (size_t i = 0; i < sentences.size(); ++i)
-            result.push_back({sentences[i], i + 1 == sentences.size() ? pause : 0.0f});
+        std::string merged;
+        for (size_t i = 0; i < sentences.size(); ++i) {
+            if (!merged.empty() && token_estimate(merged) + token_estimate(sentences[i]) > kMaxTokensPerChunk) {
+                result.push_back({merged, 0.0f});
+                merged = sentences[i];
+            } else {
+                if (!merged.empty()) merged += " ";
+                merged += sentences[i];
+            }
+        }
+        result.push_back({merged, pause});  // pause rides on the last chunk of the segment
     }
     return result;
 }
