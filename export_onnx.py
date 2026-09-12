@@ -330,7 +330,7 @@ def export_builtin_voices(output_dir: Path, language: str):
         print(f"  ✓ embeddings/{name}.kv")
 
 
-def export_language_meta(model: TTSModel, output_dir: Path):
+def export_language_meta(model: TTSModel, output_dir: Path, language: str = "english"):
     """Write runtime flags the C++ engine reads from the models dir.
 
     model_config.txt   — key=value flags; when the file is absent the C++
@@ -350,6 +350,27 @@ def export_language_meta(model: TTSModel, output_dir: Path):
         bos = model.flow_lm.bos_before_voice.detach().to(torch.float32).cpu().reshape(-1).contiguous()
         (output_dir / "bos_before_voice.f32").write_bytes(bos.numpy().tobytes())
     print(f"  ✓ model_config.txt {flags}")
+
+
+def add_output_gain(onnx_path: Path, gain: float):
+    """Fold a constant gain into the graph output (Mul node before the output).
+
+    Used to match per-language decoder loudness at export time — the German
+    codec decodes ~7x quieter than English (measured: ~-38 dB mean vs -20 dB
+    on the same sentence), so the German graph ships with gain folded in and
+    the C++ runtime stays model-agnostic. ponytail: fixed constant,
+    re-measure if Kyutai re-trains the model.
+    """
+    import onnx
+    from onnx import helper
+    g = onnx.load(str(onnx_path))
+    out = g.graph.output[0]
+    dims = [d.dim_param or d.dim_value for d in out.type.tensor_type.shape.dim]
+    g.graph.initializer.append(helper.make_tensor("output_gain", onnx.TensorProto.FLOAT, [1], [gain]))
+    g.graph.node.append(helper.make_node("Mul", [out.name, "output_gain"], [out.name + "_gained"], name="output_gain"))
+    g.graph.output[0].CopyFrom(helper.make_tensor_value_info(out.name + "_gained", out.type.tensor_type.elem_type, dims))
+    onnx.save(g, str(onnx_path))
+    print(f"  ✓ {onnx_path.name}: folded output_gain={gain} into graph output")
 
 
 def export_text_conditioner(model: TTSModel, output_path: Path):
@@ -1475,7 +1496,7 @@ def main():
     print(f"  Voice cloning: {model.has_voice_cloning}")
 
     # --- Language metadata for the C++ runtime ---
-    export_language_meta(model, output_dir)
+    export_language_meta(model, output_dir, language=args.language)
 
     # --- Export + Quantize ---
     if not args.validate_only:
@@ -1505,6 +1526,7 @@ def main():
         run_quantization(output_dir)
 
         if args.language == "german":
+            add_output_gain(output_dir / "mimi_decoder_int8.onnx", 8.0)
             print(f"\nBuiltin voices (per-language embeddings)")
             print("-" * 40)
             export_builtin_voices(output_dir, args.language)
