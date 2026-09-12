@@ -2151,6 +2151,11 @@ public:
             }
             
             if (out_voice_snap) *out_voice_snap = main_runner_.take_snapshot();
+            if (const char* dump = getenv("PTT_DUMP_VOICE_KV")) {
+                auto ds = main_runner_.snapshot_to_disk(*out_voice_snap);
+                if (ds.save_to_disk(dump))
+                    std::cerr << "  dumped voice KV snapshot to " << dump << "\n";
+            }
             
             {
                 auto _ = g_prof.time("text_conditioning_pass");
@@ -2257,6 +2262,10 @@ public:
             
             std::copy(fx_.begin(), fx_.end(), cl_.begin());
             idx_++;
+            if (const char* lp = getenv("PTT_DUMP_LATENTS")) {
+                FILE* lf = fopen(lp, "ab");
+                if (lf) { fwrite(fx_.data(), 4, 32, lf); fclose(lf); }
+            }
             return Tensor({fx_.begin(), fx_.end()}, {1, 1, 32});
         }
         

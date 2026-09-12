@@ -1539,12 +1539,11 @@ def main():
             # German ships an fp32 decoder: the int8 quantization of the
             # German decoder weights is broken (validation rel error ~7 vs
             # fp32 — English quantizes to rel ~0.1), producing clipped,
-            # distorted audio. The fp32 output is ~5x quieter than English
-            # (peak ~0.2 vs 0.6; gain 3 leaves clipping headroom for per-generation variance), so the level-matching gain folds into the
-            # graph here — the C++ runtime stays model-agnostic.
+            # distorted audio. NO output-gain fold: upstream python applies
+            # no gain and C++ latents match it 1:1 — folding 3.0 made every
+            # german path +9.5 dB hot (the original hotfix bug).
             # ponytail: re-try int8 quantization when Kyutai re-trains.
             export_mimi_decoder(model, output_dir / "mimi_decoder.onnx")
-            add_output_gain(output_dir / "mimi_decoder.onnx", 3.0)
         elif export_all or "decoder" in args.export:
             export_mimi_decoder(model, output_dir / "mimi_decoder.onnx")
 
@@ -1560,8 +1559,7 @@ def main():
 
     # --- Validate ---
     if not args.no_validate:
-        fp32_pass = run_validation(model, output_dir, int8=False,
-                               decoder_gain=4.0 if args.language == "german" else 1.0)
+        fp32_pass = run_validation(model, output_dir, int8=False)
 
         int8_pass = True
         if (output_dir / "flow_lm_main_int8.onnx").exists():
