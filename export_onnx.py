@@ -1414,6 +1414,11 @@ def main():
         HF_BASE = "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/main/languages/german"
         weights_name = "model.safetensors"     # final key format, loads via strict load_state_dict
         config_name = "german.yaml"
+        # Gated repo: full weights including the REAL Mimi encoder (WAV voice
+        # cloning). The ungated without-voice-cloning twin has the encoder
+        # zeroed (remove_voice_cloning_and_push.py); per-language voice
+        # embeddings are shipped in both repos and are identical.
+        gated_weights = ("kyutai/pocket-tts", "languages/german/model.safetensors")
     elif args.language == "english_2026-04":
         # Current kyutai default model with BOS prompt handling and working
         # cloning encoder. NOTE: the ungated without-voice-cloning file has the
@@ -1478,10 +1483,9 @@ def main():
         print(f"\nExport")
         print("-" * 40)
 
-        # German public weights ship a zeroed Mimi encoder (no WAV voice cloning),
-        # so there is nothing to export — voices come from Kyutai's shipped
-        # per-language embeddings instead (converted to .kv below).
-        is_vc_capable = args.language in ("english", "english_2026-04")
+        # With the gated weights the German Mimi encoder is real, so it exports
+        # like English and WAV voice cloning works.
+        is_vc_capable = args.language in ("english", "english_2026-04", "german")
 
         if is_vc_capable and (export_all or "encoder" in args.export):
             export_mimi_encoder(model, output_dir / "mimi_encoder.onnx")
@@ -1500,7 +1504,7 @@ def main():
 
         run_quantization(output_dir)
 
-        if not is_vc_capable:
+        if args.language == "german":
             print(f"\nBuiltin voices (per-language embeddings)")
             print("-" * 40)
             export_builtin_voices(output_dir, args.language)

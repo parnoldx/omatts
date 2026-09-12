@@ -13,6 +13,7 @@ libonnxruntime.so*
 # ONNX models (too large for git — produced by export_onnx.py)
 models/
 models-german/
+models-de/
 
 # Voice samples and cache
 voices/
