@@ -3085,26 +3085,6 @@ static const char* player_command() {
     return cmd.c_str();
 }
 
-// Grow the pipe to the player. Linux caps unprivileged F_SETPIPE_SZ at
-// fs.pipe-max-size (1MB by default), so 4MB only takes after:
-//   sudo sysctl fs.pipe-max-size=4194304
-// Returns the achieved capacity (0 if unsupported). Callers print it so the
-// buffer experiment is verifiable: a "1024 KiB" line means the kernel cap bit
-// and a bigger buffer can't be the fix.
-static size_t grow_playback_pipe(FILE* p) {
-#ifdef __linux__
-    // 4MB is what we want; without CAP_SYS_RESOURCE the kernel caps us at
-    // fs.pipe-max-size, so fall back to the old 1MB rather than 64KB default.
-    if (fcntl(fileno(p), F_SETPIPE_SZ, 4u << 20) == -1)
-        fcntl(fileno(p), F_SETPIPE_SZ, 1u << 20);
-    int got = fcntl(fileno(p), F_GETPIPE_SZ);
-    return got > 0 ? (size_t)got : 0;
-#else
-    (void)p;
-    return 0;
-#endif
-}
-
 // Live generation progress. Real length is unknown until EOS, so the bar is
 // scaled to a word-count estimate and clamps at 100% — a courtesy indicator,
 // not a contract. Drawn on stderr only when it's a tty (and not --quiet/--stdout).
@@ -3119,15 +3099,16 @@ struct Progress {
     // leaves the bar pinned at 100% while the player drains. Drive the bar from
     // the clock instead, capped at the generated length once it's known.
     bool realtime = false;
+    bool anchored = false;                  // audio observed flowing
     std::atomic<bool> running{false};
     std::atomic<size_t> cap{0};
     std::chrono::steady_clock::time_point play_start;
+    std::chrono::steady_clock::time_point first_write{};  // first PCM byte handed to the player
     std::thread ticker;
 
     ~Progress() { stop_realtime(); }
 
-    void begin(const std::string& text, bool show) {
-        if (!show) return;
+    void setup(const std::string& text) {
         enabled = true;
 #ifdef _WIN32
         tty = _isatty(_fileno(stderr)) != 0;
@@ -3143,17 +3124,50 @@ struct Progress {
         }
         est_sec = std::max(1.0, words / 4.0);  // ~240 wpm observed
         last = std::chrono::steady_clock::now();
+    }
+
+    void begin(const std::string& text, bool show) {
+        if (!show) return;
+        setup(text);
         if (tty) render();
         else std::cerr << "Speaking...\n";
         std::cerr.flush();
     }
 
+    // Playback: the bar waits for anchor_realtime(). The player only reads from
+    // the pipe once its output stream is actually driving, so rendering before
+    // that lies — short clips were ~50% done on the bar before anything was
+    // audible (PipeWire stream negotiation takes a few hundred ms).
     void begin_realtime(const std::string& text, bool show) {
         if (!show) return;
-        play_start = std::chrono::steady_clock::now();
-        begin(text, true);
-        if (!enabled || !tty) { realtime = true; return; }
+        setup(text);
         realtime = true;
+    }
+
+    // Start the playback clock the moment audio is first observed flowing.
+    // Idempotent; `at` lets the caller anchor slightly in the past (the
+    // player renders ~100ms ahead of what's audible).
+    bool anchor_realtime(std::chrono::steady_clock::time_point at
+                             = std::chrono::steady_clock::now()) {
+        if (!realtime || anchored) return false;
+        anchored = true;
+        auto now = std::chrono::steady_clock::now();
+        if (at == now) {
+            // Fallback (player never observed rendering — no pactl, or a
+            // wedged player): generation slower than realtime means audio
+            // starts with the first chunk, so anchor there; a clip that fits
+            // the pipe starts once the last chunk is written, so anchor now.
+            bool have_first = first_write.time_since_epoch().count() != 0;
+            double gen = have_first ? std::chrono::duration<double>(now - first_write).count() : 0;
+            double audio = (double)cap.load() / Omatts::SR;
+            at = (have_first && gen > audio) ? first_write : now;
+        }
+        play_start = at;
+        if (!tty) {
+            std::cerr << "Speaking...\n";
+            std::cerr.flush();
+            return true;
+        }
         running = true;
         ticker = std::thread([this] {
             while (running) {
@@ -3169,6 +3183,8 @@ struct Progress {
                 render();
             }
         });
+        render();
+        return true;
     }
 
     void add(size_t n) {
@@ -3230,6 +3246,70 @@ struct Progress {
         std::cerr << "\n";
     }
 };
+
+// ── Audible detection (playback bar anchor) ─────────────────────────────────
+// The playback bar must start when sound actually hits the speakers, not when
+// generation starts: the player takes a few hundred ms to connect and buffers
+// ~100ms before rendering, so a bar started at generation time showed short
+// clips ~50% done before anything was audible. PulseAudio/PipeWire flips the
+// default sink's state to RUNNING the moment the player starts rendering
+// (measured: flip at ~190ms, audible ~100ms later — pw-cat's --latency
+// default buffer); we anchor the bar there.
+static bool pactl_available() {
+    static const bool ok = std::system("command -v pactl >/dev/null 2>&1") == 0;
+    return ok;
+}
+
+static bool sink_rendering() {
+    // State precedes Name in each sink block, so buffer per block and test both.
+    return std::system(
+        "pactl list sinks 2>/dev/null | awk -v s=\"$(pactl get-default-sink 2>/dev/null)\" "
+        "'/^Sink #/{b=\"\"} {b=b $0 \"\\n\"} "
+        "index(b, \"Name: \" s) && b ~ /State: *RUNNING/{f=1} END{exit !f}'") == 0;
+}
+
+// Poll (throttled) whether the sink started rendering; when it flips, anchor
+// the bar at flip + the player's render buffer, i.e. first audible. Cheap:
+// only runs before the anchor, ~20 pactl calls at worst.
+static void poll_audio_anchor(Progress* prog) {
+    if (!prog || prog->anchored || !pactl_available()) return;
+    static std::chrono::steady_clock::time_point last_poll{};
+    auto now = std::chrono::steady_clock::now();
+    if (last_poll.time_since_epoch().count()
+            && now - last_poll < std::chrono::milliseconds(50)) return;
+    last_poll = now;
+    if (sink_rendering())
+        prog->anchor_realtime(now + std::chrono::milliseconds(100));
+}
+
+// Timed raw write into the player pipe. Returns false if the player died
+// (the caller aborts streaming, same as a short fwrite).
+static bool player_write(FILE* ppipe, const void* data, size_t bytes, Progress* prog) {
+    const char* p = (const char*)data;
+    while (bytes) {
+#ifdef _WIN32
+        int w = _write(_fileno(ppipe), p, (unsigned)bytes);
+#else
+        ssize_t w = write(fileno(ppipe), p, bytes);
+#endif
+        if (w <= 0) {
+#ifdef _WIN32
+            if (w < 0 && (errno == EINTR || errno == EAGAIN)) continue;
+#else
+            if (w < 0 && errno == EINTR) continue;
+#endif
+            return false;
+        }
+        if (prog) {
+            if (prog->first_write.time_since_epoch().count() == 0)
+                prog->first_write = std::chrono::steady_clock::now();
+            poll_audio_anchor(prog);
+        }
+        p += w;
+        bytes -= (size_t)w;
+    }
+    return true;
+}
 
 static std::string json_escape(const std::string& s) {
     std::string out;
@@ -3477,14 +3557,19 @@ static int daemon_client(const std::string& path, const std::string& text, const
     } else if (playing) {
         FILE* ppipe = popen(player_command(), "w");
         if (!ppipe) { ptt_close(fd); return -1; }  // fall back to local mode, which reports the error
-        grow_playback_pipe(ppipe);
         size_t total = 0;
         while ((n = recv(fd, buf, sizeof(buf), 0)) > 0) {
-            if (fwrite(buf, 1, (size_t)n, ppipe) != (size_t)n) break;
-            fflush(ppipe);
+            if (!player_write(ppipe, buf, (size_t)n, &prog)) break;
             total += (size_t)n / sizeof(float);
         }
         total_samples = total;
+        auto anchor_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!prog.anchored && pactl_available()
+               && std::chrono::steady_clock::now() < anchor_deadline) {
+            poll_audio_anchor(&prog);
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        }
+        prog.anchor_realtime();  // fallback estimate if never observed
         prog.set_total(total);
         pclose(ppipe);
         prog.stop_realtime();
@@ -4094,7 +4179,6 @@ int main(int argc, char* argv[]) {
                 fwrite(w.data(), 1, w.size(), stdout);
             } else if (play_audio) {
                 FILE* ppipe = popen(omatts::player_command(), "w");
-                if (ppipe) omatts::grow_playback_pipe(ppipe);
                 if (!ppipe) {
                     std::cerr << "Error: could not start the audio player (pw-cat or aplay). Use -o FILE.\n";
                     return 1;
@@ -4115,14 +4199,26 @@ int main(int argc, char* argv[]) {
                 } else {
                     // Bar follows the clock, not generation: the player drains in
                     // realtime and would otherwise sit at 100% until the buffer ends.
+                    // The clock starts only at the first audible moment (poll_audio_anchor:
+                    // sink flips to RUNNING when the player renders) — a bar that runs
+                    // while the player is still connecting showed short clips ~50% done
+                    // before any sound came out.
                     prog.begin_realtime(text, !stdout_output && !quiet);
                     size_t total_samples = 0;
                     tts.stream(text, voice, [&](const float* s, size_t n) {
-                        fwrite(s, sizeof(float), n, ppipe);
-                        fflush(ppipe);
                         total_samples += n;
-                        return true;
+                        return omatts::player_write(ppipe, s, n * sizeof(float), &prog);
                     });
+                    // Fast generations finish before the player starts rendering;
+                    // keep watching for the flip so the bar still starts with the
+                    // audio (bounded: a wedged player must not hang the CLI).
+                    auto anchor_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                    while (!prog.anchored && omatts::pactl_available()
+                           && std::chrono::steady_clock::now() < anchor_deadline) {
+                        omatts::poll_audio_anchor(&prog);
+                        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                    }
+                    prog.anchor_realtime();  // fallback estimate if never observed
                     prog.set_total(total_samples);
                     pclose(ppipe);
                     prog.stop_realtime();
