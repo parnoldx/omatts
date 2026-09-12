@@ -2535,6 +2535,14 @@ static std::string json_get_string(const std::string& json, const std::string& k
     return result;
 }
 
+static float json_get_float(const std::string& json, const std::string& key, float def = 0) {
+    size_t pos = json.find("\"" + key + "\"");
+    if (pos == std::string::npos) return def;
+    pos = json.find(':', pos);
+    if (pos == std::string::npos) return def;
+    return std::strtof(json.c_str() + pos + 1, nullptr);
+}
+
 class TTSServer {
     Omatts& tts_;
     int port_;
@@ -2700,6 +2708,78 @@ public:
         return buf;
     }
     
+    // ffmpeg availability, resolved once (same check as the player fallback below).
+    static bool has_ffmpeg() {
+        static bool ok = std::system("command -v ffmpeg >/dev/null 2>&1") == 0;
+        return ok;
+    }
+    
+    // Encode samples to mp3/opus via ffmpeg — not encodable with the vendored
+    // dr-* single-header libs (decode-only). popen is one-directional, so the
+    // WAV goes via a temp file and ffmpeg streams encoded bytes back on stdout.
+    // Run samples through an ffmpeg filter chain and return the raw output
+    // bytes. WAV in via temp file (popen is one-directional), bytes out on stdout.
+    static std::vector<uint8_t> ffmpeg_run(const std::vector<float>& samples, const std::string& args) {
+        char tmpl[] = "/tmp/omatts_XXXXXX"; // no suffix: mkstemp wants XXXXXX last
+        int fd = mkstemp(tmpl);
+        if (fd < 0) return {};
+        auto wav = wav_encode(samples.data(), samples.size(), Omatts::SR);
+        // write() can return short on large buffers — loop until fully written
+        size_t off = 0;
+        while (off < wav.size()) {
+            ssize_t n = write(fd, wav.data() + off, wav.size() - off);
+            if (n <= 0) break;
+            off += size_t(n);
+        }
+        bool written = off == wav.size();
+        close(fd);
+        std::vector<uint8_t> out;
+        if (written) {
+            std::string cmd = "ffmpeg -v error -f wav -i \"" + std::string(tmpl) + "\" " + args + " pipe:1 2>/dev/null";
+            FILE* pipe = popen(cmd.c_str(), "r");
+            if (pipe) {
+                uint8_t buf[8192];
+                size_t n;
+                while ((n = fread(buf, 1, sizeof(buf), pipe)) > 0)
+                    out.insert(out.end(), buf, buf + n);
+                if (pclose(pipe) != 0) out.clear();
+            }
+        }
+        unlink(tmpl);
+        return out;
+    }
+
+    static std::vector<uint8_t> ffmpeg_encode(const std::vector<float>& samples, const std::string& format) {
+        std::string args = (format == "mp3")
+            ? "-f mp3 -c:a libmp3lame -b:a 128k"
+            : "-f ogg -c:a libopus -b:a 96k";
+        return ffmpeg_run(samples, args);
+    }
+
+    // Encode samples for -o FILE by extension: .mp3/.opus via ffmpeg, else WAV.
+    // Returns empty on ffmpeg failure.
+    static std::vector<uint8_t> encode_output(const std::vector<float>& samples, const std::string& path) {
+        if (path.size() >= 4 && path.compare(path.size() - 4, 4, ".mp3") == 0)
+            return ffmpeg_encode(samples, "mp3");
+        if (path.size() >= 5 && path.compare(path.size() - 5, 5, ".opus") == 0)
+            return ffmpeg_encode(samples, "opus");
+        return wav_encode(samples.data(), samples.size(), Omatts::SR);
+    }
+
+    // Pitch-preserving time-stretch: speed=2.0 means the speaker talks twice
+    // as fast at the same pitch (atempo range covers our [0.5, 4.0] clamp).
+    // Requires ffmpeg (ships with Omarchy) — no pitch-shifting fallback: fail
+    // loudly rather than silently return wrong-sounding audio.
+    static void apply_speed(std::vector<float>& samples, float speed) {
+        if (speed == 1.0f || samples.empty()) return;
+        if (!has_ffmpeg()) throw std::runtime_error("speed requires ffmpeg, which was not found");
+        auto raw = ffmpeg_run(samples, "-filter:a atempo=" + std::to_string(speed) +
+                                      " -f f32le -ac 1 -ar " + std::to_string(Omatts::SR));
+        if (raw.size() < sizeof(float)) throw std::runtime_error("ffmpeg speed processing failed");
+        samples.assign(reinterpret_cast<const float*>(raw.data()),
+                       reinterpret_cast<const float*>(raw.data() + raw.size() - raw.size() % sizeof(float)));
+    }
+    
     bool send_chunked_header(ptt_socket_t fd, const std::string& content_type) {
         std::ostringstream resp;
         resp << "HTTP/1.1 200 OK\r\n";
@@ -2795,11 +2875,13 @@ public:
         }
         else if (req.method == "POST" && req.path == "/v1/audio/speech") {
             // OpenAI-compatible TTS endpoint
-            // Accepts: { "model": "...", "input": "...", "voice": "...", "response_format": "wav"|"pcm" }
-            // "model" and "speed" are accepted but ignored.
+            // Accepts: { "model": "...", "input": "...", "voice": "...",
+            //            "response_format": "wav"|"pcm"|"mp3"|"opus", "speed": 0.5..4.0 }
+            // "model" is accepted but ignored. mp3/opus require ffmpeg.
             std::string text = json_get_string(req.body, "input");
             std::string voice = json_get_string(req.body, "voice");
             std::string format = json_get_string(req.body, "response_format");
+            float speed = json_get_float(req.body, "speed", 1.0f);
             if (format.empty()) format = "wav";
             
             if (text.empty() || voice.empty()) {
@@ -2808,14 +2890,24 @@ public:
                 return;
             }
             
-            if (format != "wav" && format != "pcm") {
+            if (format != "wav" && format != "pcm" && format != "mp3" && format != "opus") {
                 send_response(client_fd, 400, "application/json",
-                    "{\"error\":{\"message\":\"Unsupported response_format. Use 'wav' or 'pcm'.\",\"type\":\"invalid_request_error\"}}");
+                    "{\"error\":{\"message\":\"Unsupported response_format. Use 'wav', 'pcm', 'mp3' or 'opus'.\",\"type\":\"invalid_request_error\"}}");
                 return;
             }
             
+            if ((format == "mp3" || format == "opus") && !has_ffmpeg()) {
+                send_response(client_fd, 400, "application/json",
+                    "{\"error\":{\"message\":\"response_format '" + format + "' requires ffmpeg, which was not found\",\"type\":\"invalid_request_error\"}}");
+                return;
+            }
+            
+            // speed=1.0 unchanged; speed=2.0 means the speaker talks twice as
+            // fast at the same pitch (atempo when ffmpeg exists, resample fallback).
+            speed = std::max(0.5f, std::min(4.0f, speed));
+            
             auto start = std::chrono::high_resolution_clock::now();
-            std::cout << "  [OpenAI] Generating: \"" << text << "\" with voice '" << voice << "' (format: " << format << ")\n";
+            std::cout << "  [OpenAI] Generating: \"" << text << "\" with voice '" << voice << "' (format: " << format << ", speed: " << speed << ")\n";
             
             try {
                 AudioData audio;
@@ -2823,6 +2915,8 @@ public:
                     std::lock_guard<std::mutex> lock(tts_mutex_);
                     audio = tts_.generate(text, voice);
                 }
+                
+                apply_speed(audio.samples, speed);
                 
                 auto end = std::chrono::high_resolution_clock::now();
                 double elapsed = std::chrono::duration<double>(end - start).count();
@@ -2832,6 +2926,14 @@ public:
                 if (format == "pcm") {
                     send_binary_response(client_fd, "audio/pcm",
                         audio.samples.data(), audio.samples.size() * sizeof(float));
+                } else if (format == "mp3" || format == "opus") {
+                    auto enc = ffmpeg_encode(audio.samples, format);
+                    if (enc.empty()) {
+                        send_response(client_fd, 500, "application/json",
+                            "{\"error\":{\"message\":\"ffmpeg encoding failed\",\"type\":\"server_error\"}}");
+                        return;
+                    }
+                    send_binary_response(client_fd, format == "mp3" ? "audio/mpeg" : "audio/ogg", enc);
                 } else {
                     auto wav = wav_encode(audio.samples.data(), audio.samples.size(), Omatts::SR);
                     send_binary_response(client_fd, "audio/wav", wav);
@@ -3098,6 +3200,8 @@ static void daemon_handle_request(ptt_socket_t fd, Omatts& tts) {
     std::string text = json_get_string(line, "text");
     std::string voice = json_get_string(line, "voice");
     std::string format = json_get_string(line, "format");
+    float speed = json_get_float(line, "speed", 1.0f);
+    speed = std::max(0.5f, std::min(4.0f, speed));
     bool wav = (format == "wav");
 
     auto send_error = [&](const std::string& msg) {
@@ -3117,8 +3221,17 @@ static void daemon_handle_request(ptt_socket_t fd, Omatts& tts) {
     try {
         if (wav) {
             auto audio = tts.generate(text, voice);
+            TTSServer::apply_speed(audio.samples, speed);
             auto w = TTSServer::wav_encode(audio.samples.data(), audio.samples.size(), Omatts::SR);
             daemon_send_all(fd, reinterpret_cast<const char*>(w.data()), w.size());
+        } else if (speed != 1.0f) {
+            std::vector<float> samples;
+            tts.stream(text, voice, [&](const float* s, size_t n) {
+                samples.insert(samples.end(), s, s + n);
+                return true;
+            });
+            TTSServer::apply_speed(samples, speed);
+            daemon_send_all(fd, reinterpret_cast<const char*>(samples.data()), samples.size() * sizeof(float));
         } else {
             tts.stream(text, voice, [&](const float* s, size_t n) {
                 return daemon_send_all(fd, reinterpret_cast<const char*>(s), n * sizeof(float));
@@ -3211,7 +3324,8 @@ static void run_daemon(Omatts& tts, ptt_socket_t listen_fd, int idle_exit) {
 // 1 = daemon-reported error (reported to stderr), -1 = no daemon / transport
 // failure (caller falls back to local generation).
 static int daemon_client(const std::string& path, const std::string& text, const std::string& voice,
-                         const std::string& output, bool stdout_output, bool play_audio, bool quiet) {
+                         const std::string& output, bool stdout_output, bool play_audio, bool quiet,
+                         float speed = 1.0f) {
     ptt_socket_t fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd == PTT_INVALID_SOCKET) return -1;
     sockaddr_un addr{};
@@ -3226,7 +3340,7 @@ static int daemon_client(const std::string& path, const std::string& text, const
     bool to_file = !stdout_output && !(play_audio && output.empty());
     std::string out_path = output.empty() ? "output.wav" : output;
     std::string body = "{\"text\":\"" + json_escape(text) + "\",\"voice\":\"" + json_escape(voice) +
-                       "\",\"format\":\"pcm\"}\n";
+                       "\",\"format\":\"pcm\",\"speed\":" + std::to_string(speed) + "}\n";
     if (!daemon_send_all(fd, body.data(), body.size())) { ptt_close(fd); return -1; }
 
     uint8_t marker = 1;
@@ -3280,7 +3394,14 @@ static int daemon_client(const std::string& path, const std::string& text, const
             total_samples += cnt;
             prog.add(cnt);
         }
-        auto wav = TTSServer::wav_encode(samples.data(), samples.size(), Omatts::SR);
+        TTSServer::apply_speed(samples, speed);
+        auto wav = TTSServer::encode_output(samples, out_path);
+        if (wav.empty()) {
+            std::cerr << "Error: " << out_path << " requires ffmpeg, which was not found\n";
+            prog.finish();
+            ptt_close(fd);
+            return 1;
+        }
         std::ofstream f(out_path, std::ios::binary);
         if (!f) {
             std::cerr << "Cannot open output file: " << out_path << "\n";
@@ -3510,10 +3631,12 @@ static void print_usage(const char* p) {
                  "\nOptions:\n"
                  "  -v, --voice NAME|FILE   voice from the voices folder, or any WAV/MP3/FLAC file\n"
                  "                          (default: alba, or $OMATTS_VOICE)\n"
-                 "  -o, --output FILE       write a WAV file instead of playing (\"-\" = WAV stream to stdout)\n"
+                 "  -o, --output FILE       write FILE instead of playing: .wav (default), .mp3 or\n"
+                 "                          .opus (those two need ffmpeg); \"-\" = WAV stream to stdout\n"
                  "  -q, --quiet             no progress or status output\n"
                  "  -h, --help              this help\n"
                  "\nTuning (defaults match upstream Pocket TTS):\n"
+                 "  --speed F               speaking speed 0.5-4.0, pitch unchanged (1.0)\n"
                  "  --temperature F         sampling temperature (0.3)\n"
                  "  --lsd-steps N           flow-matching Euler steps (2)\n"
                  "  --seed N                fixed RNG seed for reproducible output (0 = random)\n"
@@ -3555,6 +3678,7 @@ int main(int argc, char* argv[]) {
     bool no_daemon = false;
     int server_port = 8080;
     int idle_exit = 300;
+    float speed = 1.0f;
     ptt_socket_t daemon_fd = PTT_INVALID_SOCKET;
     std::string text, voice, output, a;
     std::vector<std::string> words;  // positional args = the text, joined with spaces
@@ -3587,6 +3711,7 @@ int main(int argc, char* argv[]) {
         else if (a == "--voices-dir") cfg.voices_dir = next();
         else if (a == "--port") server_port = std::stoi(next());
         else if (a == "--idle-exit") idle_exit = std::stoi(next());
+        else if (a == "--speed") speed = std::stof(next());
         else if (a == "--no-daemon") no_daemon = true;
         else if (subcmd_ok && a == "serve") { server_mode = true; subcmd_ok = false; }
         else if (subcmd_ok && a == "voices") {
@@ -3637,6 +3762,7 @@ int main(int argc, char* argv[]) {
     }
     for (const auto& w : words) text += (text.empty() ? "" : " ") + w;
     if (voice.empty()) voice = getenv("OMATTS_VOICE") ? getenv("OMATTS_VOICE") : "alba";
+    speed = std::max(0.5f, std::min(4.0f, speed));
 
     cfg.resolve_defaults();
 
@@ -3669,7 +3795,7 @@ int main(int argc, char* argv[]) {
         }
         if (!daemon_mode && !selftest_leak && !no_daemon) {
             std::string sock = omatts::daemon_socket_path(cfg);
-            int r = omatts::daemon_client(sock, text, voice, output, stdout_output, play_audio, quiet);
+            int r = omatts::daemon_client(sock, text, voice, output, stdout_output, play_audio, quiet, speed);
             if (r >= 0) return r;  // served by the resident daemon
             if (omatts::spawn_daemon(argv[0], cfg, idle_exit)) spawned_daemon = true;
         }
@@ -3754,7 +3880,7 @@ int main(int argc, char* argv[]) {
             
             omatts::AudioData audio;
             
-            if (stdout_output) {
+            if (stdout_output && speed == 1.0f) {
 #ifdef _WIN32
                 _setmode(_fileno(stdout), _O_BINARY);
 #endif
@@ -3771,12 +3897,38 @@ int main(int argc, char* argv[]) {
                 });
                 audio.sample_rate = omatts::Omatts::SR;
                 audio.samples.resize(total_samples);
+            } else if (stdout_output) {
+                // speed != 1: buffer, time-stretch, then emit a complete WAV
+                prog.begin(text, !quiet);
+                tts.stream(text, voice, [&](const float* s, size_t n) {
+                    audio.samples.insert(audio.samples.end(), s, s + n);
+                    prog.add(n);
+                    return true;
+                });
+                audio.sample_rate = omatts::Omatts::SR;
+                omatts::TTSServer::apply_speed(audio.samples, speed);
+                auto w = omatts::TTSServer::wav_encode(audio.samples.data(), audio.samples.size(), omatts::Omatts::SR);
+                fwrite(w.data(), 1, w.size(), stdout);
             } else if (play_audio) {
                 FILE* ppipe = popen(omatts::player_command(), "w");
                 if (ppipe) omatts::grow_playback_pipe(ppipe);
                 if (!ppipe) {
                     std::cerr << "Error: could not start the audio player (pw-cat or aplay). Use -o FILE.\n";
                     return 1;
+                } else if (speed != 1.0f) {
+                    // speed != 1: buffer, time-stretch, then hand the player the result
+                    prog.begin(text, !stdout_output && !quiet);
+                    tts.stream(text, voice, [&](const float* s, size_t n) {
+                        audio.samples.insert(audio.samples.end(), s, s + n);
+                        prog.add(n);
+                        return true;
+                    });
+                    audio.sample_rate = omatts::Omatts::SR;
+                    omatts::TTSServer::apply_speed(audio.samples, speed);
+                    prog.set_total(audio.samples.size());
+                    fwrite(audio.samples.data(), sizeof(float), audio.samples.size(), ppipe);
+                    pclose(ppipe);
+                    prog.finish();
                 } else {
                     // Bar follows the clock, not generation: the player drains in
                     // realtime and would otherwise sit at 100% until the buffer ends.
@@ -3802,8 +3954,18 @@ int main(int argc, char* argv[]) {
                     prog.add(n);
                     return true;
                 });
+                omatts::TTSServer::apply_speed(samples, speed);
                 audio = {std::move(samples), omatts::Omatts::SR};
-                omatts::Omatts::save_audio(audio, output);
+                if (output.size() >= 4 && (output.compare(output.size() - 4, 4, ".mp3") == 0 ||
+                                           output.compare(output.size() - 5, 5, ".opus") == 0)) {
+                    auto enc = omatts::TTSServer::encode_output(audio.samples, output);
+                    if (enc.empty()) throw std::runtime_error(output + " requires ffmpeg, which was not found");
+                    std::ofstream f(output, std::ios::binary);
+                    if (!f) throw std::runtime_error("Failed to write: " + output);
+                    f.write(reinterpret_cast<const char*>(enc.data()), (std::streamsize)enc.size());
+                } else {
+                    omatts::Omatts::save_audio(audio, output);
+                }
             }
             prog.finish();
             double gen_time = elapsed();
