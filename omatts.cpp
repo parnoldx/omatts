@@ -523,26 +523,38 @@ static std::vector<std::string> split_sentences(const std::string& text_in) {
 // sentence-split and carries the pause that follows its last sentence. Tags
 // never reach the tokenizer.
 
-static std::vector<std::pair<std::string, float>> split_pauses(const std::string& text) {
-    std::vector<std::pair<std::string, float>> parts;
+// [[volume F]] sets the gain for the text that follows (clamped to [0.1, 2];
+// [[volume]] with no number resets to 1), stacked on top of --volume. Both tags
+// split the text into chunks; tags never reach the tokenizer.
+struct TextChunk { std::string text; float pause = 0.0f; float volume = 1.0f; };
+
+static std::vector<TextChunk> split_pauses(const std::string& text) {
+    std::vector<TextChunk> parts;
+    float vol = 1.0f;
     size_t pos = 0;
     while (true) {
-        size_t open = text.find("[[pause", pos);
+        size_t p = text.find("[[pause", pos);
+        size_t v = text.find("[[volume", pos);
+        size_t open = std::min(p, v);
         if (open == std::string::npos) {
-            parts.push_back({text.substr(pos), 0.0f});
+            parts.push_back({text.substr(pos), 0.0f, vol});
             break;
         }
-        parts.push_back({text.substr(pos, open - pos), 0.0f});
+        parts.push_back({text.substr(pos, open - pos), 0.0f, vol});
         size_t close = text.find("]" "]", open);
         if (close == std::string::npos) {  // unterminated tag: keep as literal text
-            parts.back().first += text.substr(open);
+            parts.back().text += text.substr(open);
             break;
         }
-        float sec = 0.5f;  // [[pause]] with no number
-        try {
-            sec = std::clamp(std::stof(text.substr(open + 7, close - open - 7)), 0.0f, 10.0f);
-        } catch (...) {}
-        parts.back().second = sec;
+        std::string inner = text.substr(open + 2, close - open - 2);  // "pause 1" / "volume 2"
+        if (v < p) {
+            try { vol = std::clamp(std::stof(inner.substr(7)), 0.1f, 2.0f); }
+            catch (...) { vol = 1.0f; }  // [[volume]] with no number: reset
+        } else {
+            float sec = 0.5f;  // [[pause]] with no number
+            try { sec = std::clamp(std::stof(inner.substr(6)), 0.0f, 10.0f); } catch (...) {}
+            parts.back().pause = sec;
+        }
         pos = close + 2;
     }
     return parts;
@@ -550,7 +562,7 @@ static std::vector<std::pair<std::string, float>> split_pauses(const std::string
 
 static int count_words(const std::string& text);
 
-static std::vector<std::pair<std::string, float>> sentences_with_pauses(const std::string& text) {
+static std::vector<TextChunk> sentences_with_pauses(const std::string& text) {
     // Merge consecutive sentences into one generation chunk up to a token budget,
     // mirroring upstream split_into_best_sentences (MAX_TOKEN_PER_CHUNK = 50).
     // Every chunk starts cold from the voice state and the first words of short
@@ -558,24 +570,24 @@ static std::vector<std::pair<std::string, float>> sentences_with_pauses(const st
     constexpr size_t kMaxTokensPerChunk = 50;
     auto token_estimate = [](const std::string& s) { return count_words(s) + 2; };
 
-    std::vector<std::pair<std::string, float>> result;
-    for (auto& [seg, pause] : split_pauses(text)) {
-        auto sentences = split_sentences(seg);
+    std::vector<TextChunk> result;
+    for (auto& seg : split_pauses(text)) {
+        auto sentences = split_sentences(seg.text);
         if (sentences.empty()) {
-            if (pause > 0) result.push_back({"", pause});
+            if (seg.pause > 0) result.push_back({"", seg.pause, seg.volume});
             continue;
         }
         std::string merged;
         for (size_t i = 0; i < sentences.size(); ++i) {
             if (!merged.empty() && token_estimate(merged) + token_estimate(sentences[i]) > kMaxTokensPerChunk) {
-                result.push_back({merged, 0.0f});
+                result.push_back({merged, 0.0f, seg.volume});
                 merged = sentences[i];
             } else {
                 if (!merged.empty()) merged += " ";
                 merged += sentences[i];
             }
         }
-        result.push_back({merged, pause});  // pause rides on the last chunk of the segment
+        result.push_back({merged, seg.pause, seg.volume});  // pause rides on the last chunk of the segment
     }
     return result;
 }
@@ -2406,8 +2418,9 @@ struct SilenceGate {
     static constexpr float LOUD = 0.02f;  // ~ -34 dBFS: speech vs decode noise floor
     static constexpr int RATE = 24000;    // Omatts::SR (member constant, mirror here)
     StreamCallback cb_;
-    size_t quiet_run_ = 0;       // samples in the current quiet run
-    bool heard_speech_ = false;  // head cap applies until the first loud sample
+    float gain_ = 1.0f;           // [[volume]] gain, applied AFTER the loudness test
+    size_t quiet_run_ = 0;        // samples in the current quiet run
+    bool heard_speech_ = false;   // head cap applies until the first loud sample
     explicit SilenceGate(StreamCallback cb) : cb_(std::move(cb)) {}
     size_t cap() const { return heard_speech_ ? size_t(0.4 * RATE) : size_t(0.2 * RATE); }
     bool operator()(const float* s, size_t n) {
@@ -2420,7 +2433,7 @@ struct SilenceGate {
             } else if (++quiet_run_ > cap()) {
                 continue;  // squashed: over-cap quiet sample dropped
             }
-            out.push_back(s[i]);
+            out.push_back(std::clamp(s[i] * gain_, -1.0f, 1.0f));
         }
         if (out.empty()) return true;
         return cb_(out.data(), out.size());
@@ -2488,13 +2501,14 @@ void Omatts::stream(const std::string& text, const Tensor& voice, StreamCallback
     auto sentences = sentences_with_pauses(text);
     
     for (size_t si = 0; si < sentences.size(); ++si) {
-        auto [prepared, eos_extra] = prepare_text(sentences[si].first, cfg_.eos_extra_frames,
+        gate.gain_ = sentences[si].volume;
+        auto [prepared, eos_extra] = prepare_text(sentences[si].text, cfg_.eos_extra_frames,
                                                    cfg_.pad_short_inputs, cfg_.remove_semicolons);
         if (prepared.empty()) {
             // No speakable text (empty segment / punctuation only), but a pause
             // may still follow: leading "[[pause 1]]", trailing tag, "[[pause]]".
-            if (sentences[si].second > 0) {
-                std::vector<float> silence(size_t(std::lround(sentences[si].second * SR)));
+            if (sentences[si].pause > 0) {
+                std::vector<float> silence(size_t(std::lround(sentences[si].pause * SR)));
                 if (!cb(silence.data(), silence.size())) return;
             }
             continue;
@@ -2606,8 +2620,8 @@ void Omatts::stream(const std::string& text, const Tensor& voice, StreamCallback
         if (aborted) return;
         
         // Silence for a [[pause N]] tag following this sentence
-        if (sentences[si].second > 0) {
-            std::vector<float> silence(size_t(std::lround(sentences[si].second * SR)));
+        if (sentences[si].pause > 0) {
+            std::vector<float> silence(size_t(std::lround(sentences[si].pause * SR)));
             if (!cb(silence.data(), silence.size())) return;
         }
     }
@@ -3010,6 +3024,17 @@ public:
         if (raw.size() < sizeof(float)) throw std::runtime_error("ffmpeg speed processing failed");
         samples.assign(reinterpret_cast<const float*>(raw.data()),
                        reinterpret_cast<const float*>(raw.data() + raw.size() - raw.size() % sizeof(float)));
+    }
+
+    // Linear gain: 1.0 unchanged, 0.0 silent, 2.0 twice as loud. Applied
+    // client-side (like speed), so the daemon protocol needs no change.
+    static void apply_volume(float* data, size_t n, float volume) {
+        if (volume == 1.0f) return;
+        for (size_t i = 0; i < n; i++)
+            data[i] = std::max(-1.0f, std::min(1.0f, data[i] * volume));
+    }
+    static void apply_volume(std::vector<float>& samples, float volume) {
+        apply_volume(samples.data(), samples.size(), volume);
     }
     
     bool send_chunked_header(ptt_socket_t fd, const std::string& content_type) {
@@ -3657,7 +3682,7 @@ static void run_daemon(Omatts& tts, ptt_socket_t listen_fd, int idle_exit) {
 // failure (caller falls back to local generation).
 static int daemon_client(const std::string& path, const std::string& text, const std::string& voice,
                          const std::string& output, bool stdout_output, bool play_audio, bool quiet,
-                         float speed = 1.0f) {
+                         float speed = 1.0f, float volume = 1.0f) {
     ptt_socket_t fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd == PTT_INVALID_SOCKET) return -1;
     sockaddr_un addr{};
@@ -3703,6 +3728,7 @@ static int daemon_client(const std::string& path, const std::string& text, const
             prog.add(cnt);
         }
         TTSServer::apply_speed(samples, speed);
+        TTSServer::apply_volume(samples, volume);
         auto wav = TTSServer::encode_output(samples, out_path);
         if (wav.empty()) {
             std::cerr << "Error: " << out_path << " requires ffmpeg, which was not found\n";
@@ -3720,6 +3746,7 @@ static int daemon_client(const std::string& path, const std::string& text, const
 #endif
         write_wav_stream_header(stdout);
         while ((n = recv(fd, buf, sizeof(buf), 0)) > 0) {
+            TTSServer::apply_volume(reinterpret_cast<float*>(buf), (size_t)n / sizeof(float), volume);
             fwrite(buf, 1, (size_t)n, stdout);
             total_samples += (size_t)n / sizeof(float);
             prog.add((size_t)n / sizeof(float));
@@ -3729,6 +3756,7 @@ static int daemon_client(const std::string& path, const std::string& text, const
         if (!ppipe) { ptt_close(fd); return -1; }  // fall back to local mode, which reports the error
         size_t total = 0;
         while ((n = recv(fd, buf, sizeof(buf), 0)) > 0) {
+            TTSServer::apply_volume(reinterpret_cast<float*>(buf), (size_t)n / sizeof(float), volume);
             if (!player_write(ppipe, buf, (size_t)n, &prog)) break;
             total += (size_t)n / sizeof(float);
         }
@@ -3753,6 +3781,7 @@ static int daemon_client(const std::string& path, const std::string& text, const
             prog.add(cnt);
         }
         TTSServer::apply_speed(samples, speed);
+        TTSServer::apply_volume(samples, volume);
         auto wav = TTSServer::encode_output(samples, out_path);
         if (wav.empty()) {
             std::cerr << "Error: " << out_path << " requires ffmpeg, which was not found\n";
@@ -3998,6 +4027,7 @@ static void print_usage(const char* p) {
                  "  -h, --help              this help\n"
                  "\nTuning:\n"
                  "  --speed F               speaking speed 0.5-4.0, pitch unchanged (1.0)\n"
+                 "  --volume F              output gain 0.1-2, 1.0 unchanged (1.0)\n"
                  "  --temperature F         sampling temperature (0.3)\n"
                  "  --lsd-steps N           flow-matching Euler steps (2)\n"
                  "  --seed N                fixed RNG seed for reproducible output (0 = random)\n"
@@ -4007,6 +4037,8 @@ static void print_usage(const char* p) {
                  "\nText:\n"
                  "  [[pause N]]             N seconds of silence (default 0.5, max 10), e.g.\n"
                  "                          omatts \"Hello. [[pause 1]] Goodbye.\"\n"
+                 "  [[volume F]]            volume for the following text (0.1-2, reset: [[volume]]),\n"
+                 "                          e.g. omatts \"Softly. [[volume 2]] And louder.\"\n"
                  "  Special characters      wrap the whole message in quotes:\n"
                  "                          omatts \"Wait - what?! Sure.\"\n"
                  "\nPaths (default: ~/.local/share/omatts/models and /voices, as installed):\n"
@@ -4089,6 +4121,7 @@ int main(int argc, char* argv[]) {
     int server_port = 8080;
     int idle_exit = 300;
     float speed = 1.0f;
+    float volume = 1.0f;
     ptt_socket_t daemon_fd = PTT_INVALID_SOCKET;
     std::string text, voice, output, a;
     std::vector<std::string> words;  // positional args = the text, joined with spaces
@@ -4126,6 +4159,7 @@ int main(int argc, char* argv[]) {
         else if (a == "--port") server_port = std::stoi(next());
         else if (a == "--idle-exit") idle_exit = std::stoi(next());
         else if (a == "--speed") speed = std::stof(next());
+        else if (a == "--volume") volume = std::stof(next());
         else if (a == "--no-daemon") no_daemon = true;
         else if (subcmd_ok && a == "serve") { server_mode = true; subcmd_ok = false; }
         else if (subcmd_ok && a == "voices") {
@@ -4250,6 +4284,7 @@ int main(int argc, char* argv[]) {
     for (const auto& w : words) text += (text.empty() ? "" : " ") + w;
     if (voice.empty()) voice = getenv("OMATTS_VOICE") ? getenv("OMATTS_VOICE") : "alba";
     speed = std::max(0.5f, std::min(4.0f, speed));
+    volume = std::max(0.1f, std::min(2.0f, volume));
 
     cfg.resolve_defaults();
 
@@ -4294,7 +4329,7 @@ int main(int argc, char* argv[]) {
         }
         if (!daemon_mode && !selftest_leak && !no_daemon) {
             std::string sock = omatts::daemon_socket_path(cfg);
-            int r = omatts::daemon_client(sock, text, voice, output, stdout_output, play_audio, quiet, speed);
+            int r = omatts::daemon_client(sock, text, voice, output, stdout_output, play_audio, quiet, speed, volume);
             if (r >= 0) return r;  // served by the resident daemon
             if (omatts::spawn_daemon(argv[0], cfg, idle_exit)) spawned_daemon = true;
         }
@@ -4496,7 +4531,7 @@ int main(int argc, char* argv[]) {
             
             omatts::AudioData audio;
             
-            if (stdout_output && output.empty() && speed == 1.0f) {
+            if (stdout_output && output.empty() && speed == 1.0f && volume == 1.0f) {
 #ifdef _WIN32
                 _setmode(_fileno(stdout), _O_BINARY);
 #endif
@@ -4524,6 +4559,7 @@ int main(int argc, char* argv[]) {
                 });
                 audio.sample_rate = omatts::Omatts::SR;
                 if (speed != 1.0f) omatts::TTSServer::apply_speed(audio.samples, speed);
+                omatts::TTSServer::apply_volume(audio.samples, volume);
 #ifdef _WIN32
                 _setmode(_fileno(stdout), _O_BINARY);
 #endif
@@ -4547,6 +4583,7 @@ int main(int argc, char* argv[]) {
                     });
                     audio.sample_rate = omatts::Omatts::SR;
                     omatts::TTSServer::apply_speed(audio.samples, speed);
+                    omatts::TTSServer::apply_volume(audio.samples, volume);
                     prog.set_total(audio.samples.size());
                     fwrite(audio.samples.data(), sizeof(float), audio.samples.size(), ppipe);
                     pclose(ppipe);
@@ -4560,7 +4597,13 @@ int main(int argc, char* argv[]) {
                     // before any sound came out.
                     prog.begin_realtime(text, !stdout_output && !quiet);
                     size_t total_samples = 0;
+                    std::vector<float> chunk;  // reused per-stream-chunk volume buffer
                     tts.stream(text, voice, [&](const float* s, size_t n) {
+                        if (volume != 1.0f) {
+                            chunk.assign(s, s + n);
+                            omatts::TTSServer::apply_volume(chunk, volume);
+                            s = chunk.data();
+                        }
                         total_samples += n;
                         return omatts::player_write(ppipe, s, n * sizeof(float), &prog);
                     });
@@ -4589,6 +4632,7 @@ int main(int argc, char* argv[]) {
                     return true;
                 });
                 omatts::TTSServer::apply_speed(samples, speed);
+                omatts::TTSServer::apply_volume(samples, volume);
                 audio = {std::move(samples), omatts::Omatts::SR};
                 if (output.size() >= 4 && (output.compare(output.size() - 4, 4, ".mp3") == 0 ||
                                            output.compare(output.size() - 5, 5, ".opus") == 0)) {
