@@ -100,7 +100,7 @@ curl -X POST http://localhost:8080/v1/audio/speech \
 | `-v`, `--voice <name\|file>` | `alba` / `$OMATTS_VOICE` | Voice name or audio file |
 | `-o`, `--output <file>` | play | Write WAV; `-` streams to stdout |
 | `-q`, `--quiet` | — | No status output |
-| `--precision <int8\|fp32>` | `int8` | The flow model always uses fp32 when available — int8 flow sounds robotic |
+| `--precision <int8\|fp32>` | `int8` | The flow model always uses fp32 when available |
 | `--temperature <f>` | `0.3` | Sampling temperature |
 | `--lsd-steps <n>` | `2` | Flow matching ODE solver steps |
 | `--seed <n>` | `0` | Fixed seed for reproducible output (`0` = random) |
