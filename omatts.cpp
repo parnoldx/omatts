@@ -1986,16 +1986,6 @@ public:
         for (const char* ext : {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac"}) {
             if (std::filesystem::exists(full + ext)) return full + ext;
         }
-        // Pack builtin voices: models-<tag>/voices-<tag>/<name> when the voice
-        // is qualified ("de/juergen") and the tag matches the active pack.
-        size_t slash = p.find('/');
-        if (slash != std::string::npos) {
-            std::string packed = cfg_.models_dir + "/voices-" + p.substr(0, slash) + "/" + p.substr(slash + 1);
-            if (std::filesystem::exists(packed)) return packed;
-            for (const char* ext : {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac"}) {
-                if (std::filesystem::exists(packed + ext)) return packed + ext;
-            }
-        }
         return full;
     }
     
@@ -3808,17 +3798,6 @@ static std::string resolve_voice_tag(const omatts::Config& cfg, std::string& voi
         for (const char* ext : AUDIO_EXTS)
             if (std::filesystem::exists(entry.path() / (voice + ext))) { tags.push_back(tag); break; }
     }
-    // Packs ship their builtin voices self-contained as models-<tag>/voices-<tag>/;
-    // those count as candidates too so a pack install works without touching
-    // the shared voices dir.
-    for (const auto& entry : std::filesystem::directory_iterator(cfg.models_dir + "/..", ec)) {
-        if (!entry.is_directory()) continue;
-        std::string name = entry.path().filename().string();
-        if (name.rfind("models-", 0) != 0 || name == cfg.models_dir) continue;
-        std::string tag = name.substr(7);
-        for (const char* ext : AUDIO_EXTS)
-            if (std::filesystem::exists(entry.path() / ("voices-" + tag) / (voice + ext))) { tags.push_back(tag); break; }
-    }
     if (tags.empty()) return "";  // nothing anywhere: the regular not-found error fires later
     if (tags.size() > 1) {
         std::cerr << "Voice '" << voice << "' exists in several languages, use the qualified form -v <tag>/" << voice << ":\n";
@@ -3922,23 +3901,6 @@ int main(int argc, char* argv[]) {
                 for (const auto& v : std::filesystem::directory_iterator(emb))
                     if (v.is_regular_file() && v.path().extension().string() == ".kv")
                         groups[cfg.language].insert(v.path().stem().string());
-            }
-            // Other installed packs: their builtin voices live in
-            // models-<tag>/voices-<tag>/ and embeddings/.
-            std::error_code vsec;
-            for (const auto& entry : std::filesystem::directory_iterator(cfg.models_dir + "/..", vsec)) {
-                if (!entry.is_directory()) continue;
-                std::string name = entry.path().filename().string();
-                if (name.rfind("models-", 0) != 0) continue;
-                std::string tag = name.substr(7);
-                for (const auto& v : std::filesystem::directory_iterator(entry.path() / ("voices-" + tag), vsec))
-                    if (v.is_regular_file() && is_audio_ext(v.path().extension().string()))
-                        groups[tag].insert(v.path().stem().string());
-                std::string e = entry.path().string() + "/embeddings";
-                if (std::filesystem::exists(e))
-                    for (const auto& v : std::filesystem::directory_iterator(e))
-                        if (v.is_regular_file() && v.path().extension().string() == ".kv")
-                            groups[tag].insert(v.path().stem().string());
             }
             for (const auto& [tag, names] : groups) {
                 std::cout << "  " << tag << ": ";
