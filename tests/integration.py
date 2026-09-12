@@ -106,6 +106,15 @@ def http_test(common, tmp):
                 time.sleep(0.25)
         check(json.loads(body) == {"status": "ok"}, "http: /health returns ok")
 
+        voices = json.loads(urllib.request.urlopen(base + "/v1/audio/voices",
+                                                   timeout=5).read())
+        ids = [v["voice_id"] for v in voices.get("data", [])]
+        check("dhh" in ids and "de/klaus" in ids and "de" in ids,
+              "http: /v1/audio/voices lists top-level, pack and default voices")
+        defaults = [v for v in voices.get("data", []) if v.get("default")]
+        check(all(v["language"] and v["voice_id"] == v["language"] for v in defaults)
+              and len(defaults) == 1, "http: exactly one marked pack default (de)")
+
         payload = json.dumps({"input": "Hello there.", "voice": "dhh",
                               "response_format": "wav"}).encode()
         req = urllib.request.Request(base + "/v1/audio/speech", data=payload,

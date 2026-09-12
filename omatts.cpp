@@ -571,6 +571,14 @@ static std::vector<TextChunk> sentences_with_pauses(const std::string& text) {
     // cold starts garble easily — fewer chunks = fewer artifacts.
     constexpr size_t kMaxTokensPerChunk = 50;
     auto token_estimate = [](const std::string& s) { return count_words(s) + 2; };
+    // A chunk with nothing to say ("...", "—") would still pay for a cold start.
+    // Drop these sentences instead; bytes >= 0x80 count as speakable so
+    // non-ASCII letters (umlauts etc.) are never mistaken for punctuation.
+    auto speakable = [](const std::string& s) {
+        for (unsigned char c : s)
+            if (std::isalnum(c) || c >= 0x80) return true;
+        return false;
+    };
 
     std::vector<TextChunk> result;
     for (auto& seg : split_pauses(text)) {
@@ -581,6 +589,7 @@ static std::vector<TextChunk> sentences_with_pauses(const std::string& text) {
         }
         std::string merged;
         for (size_t i = 0; i < sentences.size(); ++i) {
+            if (!speakable(sentences[i])) continue;
             if (!merged.empty() && token_estimate(merged) + token_estimate(sentences[i]) > kMaxTokensPerChunk) {
                 result.push_back({merged, 0.0f, seg.volume});
                 merged = sentences[i];
@@ -589,7 +598,8 @@ static std::vector<TextChunk> sentences_with_pauses(const std::string& text) {
                 merged += sentences[i];
             }
         }
-        result.push_back({merged, seg.pause, seg.volume});  // pause rides on the last chunk of the segment
+        if (!merged.empty() || seg.pause > 0)
+            result.push_back({merged, seg.pause, seg.volume});  // pause rides on the last chunk of the segment
     }
     return result;
 }
@@ -2827,6 +2837,59 @@ static float json_get_float(const std::string& json, const std::string& key, flo
     return std::strtof(json.c_str() + pos + 1, nullptr);
 }
 
+// Audio file extensions a voice can be stored as (same list as the runtime's
+// voice loader).
+static const char* const AUDIO_EXTS[] = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac"};
+static bool is_audio_ext(const std::string& ext) {
+    for (const char* e : AUDIO_EXTS) if (ext == e) return true;
+    return false;
+}
+
+static std::string json_escape(const std::string& s);  // defined below, shared with the daemon
+
+// GET /v1/audio/voices — list the voice ids that the TTS endpoints accept:
+// top-level voice files, per-pack voice files ("de/finn") and each pack's
+// default voice (the bare tag "de", mirroring how the CLI resolves -v <tag>).
+static std::string list_voices_json(const omatts::Config& cfg) {
+    struct Voice { std::string id, name, lang; bool is_default; };
+    std::vector<Voice> voices;
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(cfg.voices_dir, ec)) {
+        std::string fname = entry.path().filename().string();
+        if (fname.empty() || fname[0] == '.') continue;
+        if (entry.is_directory()) {
+            std::string best;  // lexicographically first = the pack default, as in resolve_voice_tag
+            std::error_code ec2;
+            for (const auto& v : std::filesystem::directory_iterator(entry.path(), ec2)) {
+                std::string vf = v.path().filename().string();
+                std::string ext = v.path().extension().string();
+                if (!is_audio_ext(ext)) continue;
+                std::string stem = vf.substr(0, vf.size() - ext.size());
+                voices.push_back({fname + "/" + stem, stem, fname, false});
+                if (best.empty() || stem < best) best = stem;
+            }
+            if (!best.empty()) voices.push_back({fname, best, fname, true});
+        } else if (is_audio_ext(entry.path().extension().string())) {
+            voices.push_back({fname.substr(0, fname.size() - entry.path().extension().string().size()),
+                              fname.substr(0, fname.size() - entry.path().extension().string().size()),
+                              "", false});
+        }
+    }
+    std::sort(voices.begin(), voices.end(), [](const Voice& a, const Voice& b) { return a.id < b.id; });
+
+    std::string out = "{\"object\":\"list\",\"data\":[";
+    bool first = true;
+    for (const auto& v : voices) {
+        if (!first) out += ",";
+        first = false;
+        out += "{\"voice_id\":\"" + json_escape(v.id) + "\",\"name\":\"" + json_escape(v.name) + "\",";
+        out += std::string("\"language\":") + (v.lang.empty() ? "null" : "\"" + json_escape(v.lang) + "\"") + ",";
+        out += std::string("\"default\":") + (v.is_default ? "true" : "false") + "}";
+    }
+    out += "]}";
+    return out;
+}
+
 class TTSServer {
     Omatts& tts_;
     int port_;
@@ -2883,6 +2946,7 @@ public:
         std::cout << "TTS Server listening on http://localhost:" << port_ << "\n";
         std::cout << "Endpoints:\n";
         std::cout << "  POST /v1/audio/speech - OpenAI-compatible TTS (JSON: {\"input\": \"...\", \"voice\": \"...\"})\n";
+        std::cout << "  GET  /v1/audio/voices - List available voices\n";
         std::cout << "  POST /tts            - Streaming TTS (JSON: {\"text\": \"...\", \"voice\": \"...\"})\n";
         std::cout << "  GET  /health         - Health check\n";
         std::cout << "Press Ctrl+C to stop\n\n";
@@ -3116,6 +3180,9 @@ public:
         
         if (req.method == "GET" && req.path == "/health") {
             send_response(client_fd, 200, "application/json", "{\"status\":\"ok\"}");
+        }
+        else if (req.method == "GET" && req.path == "/v1/audio/voices") {
+            send_response(client_fd, 200, "application/json", list_voices_json(tts_.config()));
         }
         else if (req.method == "POST" && req.path == "/tts") {
             std::string text = json_get_string(req.body, "text");
@@ -3939,6 +4006,10 @@ static bool spawn_daemon(const std::string& prog_name, const Config& cfg, int id
 
 } // namespace omatts
 
+using omatts::AUDIO_EXTS;        // shared by the voice-tag resolver below
+using omatts::is_audio_ext;
+using omatts::json_escape;
+
 // ════════════════════════════════════════════════════════════════════════════
 // C API (FFI)
 // ════════════════════════════════════════════════════════════════════════════
@@ -4056,15 +4127,6 @@ void ptt_stream_end(void* stream_ctx) {
 }
 
 } // extern "C"
-
-
-// Audio file extensions a voice can be stored as (same list as the runtime's
-// voice loader).
-static const char* const AUDIO_EXTS[] = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac"};
-static bool is_audio_ext(const std::string& ext) {
-    for (const char* e : AUDIO_EXTS) if (ext == e) return true;
-    return false;
-}
 
 // Voice tag → language pack. "de/juergen" is explicit; a bare "juergen" that
 // is neither a top-level voice nor a builtin of the current pack is searched

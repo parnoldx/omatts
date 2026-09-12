@@ -84,6 +84,7 @@ with `-`: `omatts -- -foo bar`.
 | Endpoint | What it is |
 |---|---|
 | `POST /v1/audio/speech` | OpenAI-compatible TTS — a drop-in base-URL swap. `model` accepted but ignored; `response_format` is `wav` (default), `pcm`, `mp3` or `opus` (mp3/opus require ffmpeg); `speed` honored (0.5–4.0, resampled) |
+| `GET /v1/audio/voices` | List available voices as `data[].voice_id` (top-level voices, per-pack voices like `de/klaus`, and each pack's default marked `default: true`) |
 | `POST /tts` | Streams chunked PCM (`audio/pcm;rate=24000;encoding=float;bits=32`) for low-latency clients |
 | `GET /health` | Health check |
 

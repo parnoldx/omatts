@@ -107,6 +107,19 @@ static void test_sentences_with_pauses() {
     // Empty / whitespace-only input yields no chunks at all.
     CHECK(omatts::sentences_with_pauses("").empty());
     CHECK(omatts::sentences_with_pauses("   \n\t ").empty());
+
+    // Punctuation-only text is unspeakable: no chunks, no wasted cold start.
+    CHECK(omatts::sentences_with_pauses("...").empty());
+    CHECK(omatts::sentences_with_pauses("Wait, really?! ...").size() == 1u);
+
+    // A punctuation-only tail after a budget flush never becomes its own chunk:
+    // 49 words (51 est. tokens, kept since merged starts empty) + "..." (3 est.)
+    // overflows the 50-token budget, so the dots would flush into their own chunk.
+    std::string long49;
+    for (int i = 0; i < 49; i++) long49 += (i ? " " : "") + std::string("word");
+    auto dots = omatts::sentences_with_pauses(long49 + ". ...");
+    CHECK_EQ(dots.size(), 1u);
+    CHECK_EQ(dots[0].text, long49 + ".");
 }
 
 static void test_chunk_budget() {
